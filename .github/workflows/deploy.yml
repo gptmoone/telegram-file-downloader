@@ -17,3 +17,4 @@ jobs:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: deploy --var TELEGRAM_TOKEN:${{ secrets.TELEGRAM_TOKEN }} GH_TOKEN:${{ secrets.GH_TOKEN }}
+          
