@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر سریع - بدون تکرار توابع
+// ربات دانلودر سریع - نسخه نهایی بدون خطا
 // ==========================================
 
 async function sendMessage(chatId, text, keyboard, TELEGRAM_TOKEN) {
@@ -36,6 +36,7 @@ export default {
     const url = new URL(request.url);
     const TELEGRAM_TOKEN = env.TELEGRAM_TOKEN;
     
+    // Endpoint برای اعلام اتمام کار از GitHub Actions
     if (url.pathname === '/api/complete' && request.method === 'POST') {
       const body = await request.json();
       const { user_id, branch } = body;
@@ -48,16 +49,16 @@ export default {
       return new Response('Bad Request', { status: 400 });
     }
     
+    // Webhook اصلی تلگرام
     if (url.pathname === `/bot${TELEGRAM_TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
         
-        // پردازش دکمه‌ها (Callback Query)
+        // پاسخ به دکمه‌های شیشه‌ای
         if (update.callback_query) {
           const callback = update.callback_query;
           const chatId = callback.message.chat.id;
           const data = callback.data;
-          
           await answerCallback(callback.id, TELEGRAM_TOKEN);
           
           if (data === 'new_link') {
@@ -261,4 +262,11 @@ async function removeFromQueue(env, chatId) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+
+
+
+
+
+
+  
 }
