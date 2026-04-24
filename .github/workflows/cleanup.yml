@@ -2,7 +2,7 @@ name: Clean expired branches
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # هر 5 دقیقه یکبار
+    - cron: '*/30 * * * *'   # هر 30 دقیقه یکبار
   workflow_dispatch:
 
 jobs:
