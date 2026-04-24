@@ -1,0 +1,59 @@
+name: Download and Split for User
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'لینک مستقیم فایل'
+        required: true
+        type: string
+      zip_password:
+        description: 'رمز عبور ZIP'
+        required: true
+        type: string
+      user_id:
+        description: 'شناسه کاربر (chat_id)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # برای دسترسی به همه شاخه‌ها
+
+      - name: Install 7z
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Download file
+        run: curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
+
+      - name: Create archive chunks (95MB each)
+        run: |
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" downloaded_file
+
+      - name: Clean up original file
+        run: rm -f downloaded_file
+
+      - name: Create user branch
+        run: |
+          BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
+          git checkout --orphan "$BRANCH_NAME"
+          git rm -rf . 2>/dev/null || true
+          echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
+          git add archive.7z.* README.md
+          git commit -m "Add split files for user"
+          git push origin "$BRANCH_NAME"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: Notify Worker that job is done (optional)
+        run: |
+          curl -X POST "https://your-worker-name.workers.dev/api/complete" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\", \"repo\":\"${{ github.repository }}\"}"
