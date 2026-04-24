@@ -26,3 +26,4 @@ jobs:
               git push origin --delete "$branch_name"
             fi
           done
+
