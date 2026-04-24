@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "telegram-file-bot",
+  "main": "worker.js",
+  "compatibility_date": "2026-04-24",
+  "kv_namespaces": [
+    {
+      "binding": "QUEUE",
+      "id": "d5b3db4b0d1b4b96990ffcca710c1d4a"
+    }
+  ]
+}
