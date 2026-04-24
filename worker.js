@@ -28,18 +28,15 @@ async function handleWebhook(request, env) {
   try {
     const update = await request.json();
     
-    // دریافت متغیرهای محیطی (از Secrets گیت‌هاب)
     const TELEGRAM_TOKEN = env.TELEGRAM_TOKEN;
-    const GITHUB_TOKEN = env.GITHUB_PAT;
+    const GITHUB_TOKEN = env.GH_TOKEN;          // ✅ نام سکرت جدید
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
     
-    // پردازش پیام‌های متنی
     if (update.message && update.message.text) {
       const chatId = update.message.chat.id;
       const text = update.message.text.trim();
 
-      // دستور /start
       if (text === '/start') {
         const keyboard = {
           inline_keyboard: [
@@ -62,7 +59,6 @@ async function handleWebhook(request, env) {
         return new Response('OK');
       }
 
-      // بررسی وضعیت قبلی کاربر
       const currentStatus = await env.QUEUE.get(`status:${chatId}`);
       if (currentStatus && currentStatus !== 'done' && currentStatus !== 'cancelled') {
         await sendMessageSimple(chatId,
@@ -74,10 +70,8 @@ async function handleWebhook(request, env) {
         return new Response('OK');
       }
 
-      // مرحله: در انتظار لینک یا رمز؟
       const userStateRaw = await env.QUEUE.get(`state:${chatId}`);
       if (!userStateRaw) {
-        // مرحله اول: منتظر لینک
         if (text.match(/^https?:\/\//)) {
           await env.QUEUE.put(`state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text }), { expirationTtl: 3600 });
           const cancelKeyboard = {
@@ -89,27 +83,21 @@ async function handleWebhook(request, env) {
             cancelKeyboard, TELEGRAM_TOKEN
           );
         } else {
-          await sendMessageSimple(chatId,
-            "❌ لطفاً یک لینک معتبر (با http:// یا https://) ارسال کنید.",
-            TELEGRAM_TOKEN
-          );
+          await sendMessageSimple(chatId, "❌ لطفاً یک لینک معتبر (با http:// یا https://) ارسال کنید.", TELEGRAM_TOKEN);
         }
         return new Response('OK');
       }
 
       const userState = JSON.parse(userStateRaw);
       if (userState.step === 'awaiting_password') {
-        // مرحله دوم: رمز دریافت شد
         const password = text;
         const fileUrl = userState.url;
 
-        // اضافه کردن به صف
         let queue = await env.QUEUE.get('queue', 'json');
         if (!queue || !Array.isArray(queue)) queue = [];
         queue.push(chatId);
         await env.QUEUE.put('queue', JSON.stringify(queue));
 
-        // ذخیره اطلاعات درخواست
         await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password: password, timestamp: Date.now() }));
         await env.QUEUE.put(`status:${chatId}`, 'waiting');
         await env.QUEUE.delete(`state:${chatId}`);
@@ -119,12 +107,10 @@ async function handleWebhook(request, env) {
           TELEGRAM_TOKEN
         );
 
-        // شروع پردازش صف (بدون await تا بلوکه نشود)
         processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
         return new Response('OK');
       }
     }
-    // پردازش دکمه‌های شیشه‌ای (Callback Query)
     else if (update.callback_query) {
       const callback = update.callback_query;
       const chatId = callback.message.chat.id;
@@ -145,7 +131,6 @@ async function handleWebhook(request, env) {
           TELEGRAM_TOKEN
         );
       } else if (data === 'cancel' || data === 'cancel_input') {
-        // لغو درخواست
         await env.QUEUE.delete(`status:${chatId}`);
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`state:${chatId}`);
@@ -157,7 +142,6 @@ async function handleWebhook(request, env) {
         await sendMessageSimple(chatId, "❌ عملیات لغو شد. در صورت نیاز دوباره شروع کنید.", TELEGRAM_TOKEN);
       }
 
-      // پاسخ به تلگرام برای بستن لودینگ دکمه
       await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -180,7 +164,6 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
   const status = await env.QUEUE.get(`status:${chatId}`);
   if (status !== 'waiting') return;
 
-  // تغییر وضعیت به processing
   await env.QUEUE.put(`status:${chatId}`, 'processing');
   await sendMessageSimple(chatId, "🔄 در حال پردازش فایل روی گیت‌هاب... ممکن است چند دقیقه طول بکشد.", TELEGRAM_TOKEN);
 
@@ -193,7 +176,6 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
 
   const userId = `${chatId}_${Date.now()}`;
   
-  // فراخوانی GitHub API برای اجرای workflow
   const workflowResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
     method: 'POST',
     headers: {
@@ -220,7 +202,6 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
     return;
   }
 
-  // منتظر ماندن برای اتمام workflow (حداکثر 10 دقیقه)
   let branchName = null;
   for (let i = 0; i < 60; i++) {
     await sleep(10000);
@@ -256,7 +237,6 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Webhook از سمت GitHub Actions برای اعلام اتمام کار
 async function handleCompletion(request, env) {
   const body = await request.json();
   const { user_id, branch } = body;
@@ -269,7 +249,6 @@ async function handleCompletion(request, env) {
   return new Response('Bad Request', { status: 400 });
 }
 
-// مسیریابی اصلی
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
