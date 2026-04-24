@@ -1,6 +1,6 @@
 // ==========================================
 // ربات دانلودر تلگرام با پشتیبانی از GitHub Actions
-// تمام تنظیمات از Secrets گیت‌هاب خوانده می‌شود
+// تمام تنظیمات از Secrets گیت‌هاب یا Environment Variables خوانده می‌شود
 // ==========================================
 
 async function sendMessage(chatId, text, keyboard, TELEGRAM_TOKEN) {
@@ -29,7 +29,7 @@ async function handleWebhook(request, env) {
     const update = await request.json();
     
     const TELEGRAM_TOKEN = env.TELEGRAM_TOKEN;
-    const GITHUB_TOKEN = env.GH_TOKEN;          // ✅ نام سکرت جدید
+    const GITHUB_TOKEN = env.GH_TOKEN;
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
     
@@ -42,7 +42,7 @@ async function handleWebhook(request, env) {
           inline_keyboard: [
             [{ text: "📥 ارسال لینک جدید", callback_data: "new_link" }],
             [{ text: "❓ راهنما", callback_data: "help" }],
-            [{ text: "🚫 لغو درخواست", callback_data: "cancel" }]
+            [{ text: "🚫 لغو درخواست فعال", callback_data: "cancel" }]
           ]
         };
         await sendMessage(chatId,
@@ -259,7 +259,6 @@ export default {
     if (url.pathname === `/bot${TELEGRAM_TOKEN}` && request.method === 'POST') {
       return handleWebhook(request, env);
     }
-    
     return new Response('Bot is running', { status: 200 });
   }
 }
