@@ -23,6 +23,12 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
+      - name: Notify Worker that job started
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/started" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -31,14 +37,23 @@ jobs:
       - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Download file
-        run: curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
+      - name: Download file with original name
+        run: |
+          # استخراج نام اصلی فایل از لینک
+          ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
+          if [ -z "$ORIGINAL_NAME" ]; then
+            ORIGINAL_NAME="downloaded_file"
+          fi
+          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+          curl -L --fail --retry 3 -o "$ORIGINAL_NAME" "${{ github.event.inputs.file_url }}"
 
-      - name: Create archive chunks (95MB each)
-        run: 7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" downloaded_file
+      - name: Create archive chunks with original filename preserved
+        run: |
+          # ساخت آرشیو 7z با حفظ نام فایل اصلی
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" "${{ env.ORIGINAL_NAME }}"
 
       - name: Clean up original file
-        run: rm -f downloaded_file
+        run: rm -f "${{ env.ORIGINAL_NAME }}"
 
       - name: Configure git
         run: |
@@ -50,7 +65,6 @@ jobs:
         run: |
           CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
           echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
-          echo "Total chunks: $CHUNKS"
 
       - name: Notify Worker about total chunks
         run: |
@@ -88,7 +102,6 @@ jobs:
                 sleep 10
               fi
             done
-            # اطلاع‌رسانی به Worker برای به‌روزرسانی پیشرفت
             curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
               -H "Content-Type: application/json" \
               -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"uploaded_chunks\":$uploaded}"
