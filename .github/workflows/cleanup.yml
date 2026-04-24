@@ -2,8 +2,8 @@ name: Clean old branches
 
 on:
   schedule:
-    - cron: '0 */3 * * *'   # هر ۳ ساعت یک بار
-  workflow_dispatch:         # برای اجرای دستی
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 jobs:
   delete:
@@ -19,7 +19,6 @@ jobs:
           NOW=$(date +%s)
           THREE_HOURS_AGO=$((NOW - 10800))
           git branch -r | grep 'origin/user_' | while read branch; do
-            # استخراج timestamp از نام branch
             timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
             if [[ -n "$timestamp" ]] && [[ "$timestamp" -lt "$THREE_HOURS_AGO" ]]; then
               branch_name=${branch#origin/}
