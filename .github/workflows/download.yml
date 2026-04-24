@@ -53,7 +53,6 @@ jobs:
 
       - name: Notify Worker that job is done
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoonie.workers.dev/api/complete" \
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\"}"
-
