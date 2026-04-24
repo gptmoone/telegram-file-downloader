@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر پیشرفته - با آمار کاربران، صف هوشمند، وضعیت دانلود
+// ربات دانلودر پیشرفته - نسخه پایدار با آمار، صف، وضعیت و لینک کانال
 // ==========================================
 // برای دریافت لینک مستقیم فایل‌های تلگرام، فایل خود را به @filesto_bot فوروارد کنید.
 // سپس لینک دریافتی را در این ربات وارد کنید.
@@ -68,11 +68,13 @@ async function getFileSize(url) {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.path);
+    // استفاده از request.url به جای new URL که گاهی خطا می‌دهد
+    const urlObj = new URL(request.url);
+    const path = urlObj.pathname;
     const TOKEN = env.TELEGRAM_TOKEN;
 
     // Endpoint اعلام اتمام کار توسط GitHub Actions
-    if (url.pathname === '/api/complete' && request.method === 'POST') {
+    if (path === '/api/complete' && request.method === 'POST') {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
         const chatId = user_id.split('_')[0];
@@ -83,11 +85,11 @@ export default {
     }
 
     // Webhook اصلی تلگرام
-    if (url.pathname === `/bot${TOKEN}` && request.method === 'POST') {
+    if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
 
-        // افزایش آمار کاربران هنگام فعالیت (در پیام یا کلیک)
+        // ثبت آمار کاربران
         if (update.message?.chat?.id) {
           await updateStats(env, update.message.chat.id);
         }
@@ -168,7 +170,7 @@ export default {
           return new Response('OK');
         }
 
-        // ===== پیام متنی =====
+        // ===== پردازش پیام متنی =====
         if (update.message?.text) {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
