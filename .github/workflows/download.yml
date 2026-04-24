@@ -40,22 +40,61 @@ jobs:
       - name: Clean up original file
         run: rm -f downloaded_file
 
-      - name: Configure git (fix identity error)
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get total chunks count
+        id: chunks
+        run: |
+          CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
+          echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
+          echo "Total chunks: $CHUNKS"
+
+      - name: Notify Worker about total chunks
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"total_chunks\":${{ steps.chunks.outputs.total_chunks }}}"
 
       - name: Create user branch
         run: |
           BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
-          # حذف فقط فایل‌های موقتی که نباید در برنچ جدید باشند (اما فایل‌های .github/workflows را حفظ کن)
-          git rm -rf --ignore-unmatch worker.js wrangler.jsonc .github/workflows/cleanup.yml .github/workflows/deploy.yml 2>/dev/null || true
-          # ایجاد README مخصوص کاربر
+          git rm -rf --ignore-unmatch . 2>/dev/null || true
           echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
-          git add archive.7z.* README.md
-          git commit -m "Add split files for user"
-          git push origin "$BRANCH_NAME"
+          # اضافه کردن تدریجی تکه‌ها (هر بار ۲ تکه)
+          chunks=(archive.7z.*)
+          total=${#chunks[@]}
+          batch_size=2
+          start=0
+          uploaded=0
+          while [ $start -lt $total ]; do
+            end=$((start + batch_size - 1))
+            [ $end -ge $total ] && end=$((total - 1))
+            for i in $(seq $start $end); do
+              git add "${chunks[$i]}"
+            done
+            git add README.md
+            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
+            for attempt in {1..5}; do
+              if git push origin "$BRANCH_NAME"; then
+                echo "Push successful for chunks $((start+1))-$((end+1))"
+                uploaded=$((end+1))
+                break
+              else
+                echo "Push failed (attempt $attempt), retrying in 10 seconds..."
+                sleep 10
+              fi
+            done
+            # اطلاع‌رسانی به Worker برای به‌روزرسانی پیشرفت
+            curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
+              -H "Content-Type: application/json" \
+              -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"uploaded_chunks\":$uploaded}"
+            start=$((end + 1))
+            sleep 2
+          done
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
       - name: Notify Worker that job is done
