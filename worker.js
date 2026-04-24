@@ -259,6 +259,7 @@ export default {
     if (url.pathname === `/bot${TELEGRAM_TOKEN}` && request.method === 'POST') {
       return handleWebhook(request, env);
     }
+    
     return new Response('Bot is running', { status: 200 });
   }
 }
