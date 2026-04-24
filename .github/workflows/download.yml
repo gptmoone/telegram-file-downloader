@@ -40,11 +40,18 @@ jobs:
       - name: Clean up original file
         run: rm -f downloaded_file
 
+      - name: Configure git (fix identity error)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Create user branch
         run: |
           BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
-          git rm -rf . 2>/dev/null || true
+          # حذف فقط فایل‌های موقتی که نباید در برنچ جدید باشند (اما فایل‌های .github/workflows را حفظ کن)
+          git rm -rf --ignore-unmatch worker.js wrangler.jsonc .github/workflows/cleanup.yml .github/workflows/deploy.yml 2>/dev/null || true
+          # ایجاد README مخصوص کاربر
           echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
           git add archive.7z.* README.md
           git commit -m "Add split files for user"
