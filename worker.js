@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر - نسخه با ثبت خطاهای کامل GitHub
+// ربات دانلودر نهایی با ثبت خطا در لاگ
 // ==========================================
 
 async function sendMessage(chatId, text, keyboard, TELEGRAM_TOKEN) {
@@ -63,10 +63,10 @@ export default {
             await sendMessageSimple(chatId, "لطفاً لینک مستقیم فایل را ارسال کنید.", TELEGRAM_TOKEN);
           } 
           else if (data === 'help') {
-            const helpText = `📘 <b>راهنمای استفاده</b>\n\n` +
+            const helpText = `📘 راهنمای استفاده\n\n` +
               `این ربات برای دانلود فایل‌های فیلترشده بدون نیاز به فیلترشکن طراحی شده است.\n\n` +
-              `🔹 <b>مراحل:</b>\n` +
-              `1️⃣ فایل خود را به ربات <code>@filesto_bot</code> فوروارد کنید تا لینک مستقیم بگیرید.\n` +
+              `مراحل:\n` +
+              `1️⃣ فایل خود را به ربات @filesto_bot فوروارد کنید تا لینک مستقیم بگیرید.\n` +
               `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
               `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
               `4️⃣ پس از پردازش، لینک داخلی (GitHub) دریافت می‌کنید.\n` +
@@ -104,9 +104,9 @@ export default {
                 [{ text: "🚫 لغو درخواست فعال", callback_data: "cancel" }]
               ]
             };
-            const startText = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
+            const startText = `🌀 به ربات دانلودر خوش آمدید 🌀\n\n` +
               `من فایل را از لینک مستقیم دانلود کرده، به تکه‌های ۹۵ مگابایتی تقسیم می‌کنم و در گیت‌هاب آپلود می‌کنم.\n\n` +
-              `🔹 <b>مراحل:</b>\n` +
+              `مراحل:\n` +
               `1️⃣ لینک مستقیم فایل را بفرستید\n` +
               `2️⃣ یک رمز عبور برای ZIP انتخاب کنید\n` +
               `3️⃣ منتظر بمانید تا پردازش شود\n` +
@@ -133,7 +133,7 @@ export default {
                 inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]]
               };
               await sendMessage(chatId,
-                "✅ لینک دریافت شد.\n\n🔐 <b>مرحله دوم:</b> رمز عبور فایل ZIP را وارد کنید.\nاین رمز برای باز کردن فایل نهایی لازم است. حتماً آن را حفظ کنید.",
+                "✅ لینک دریافت شد.\n\n🔐 مرحله دوم: رمز عبور فایل ZIP را وارد کنید.\nاین رمز برای باز کردن فایل نهایی لازم است. حتماً آن را حفظ کنید.",
                 cancelKeyboard, TELEGRAM_TOKEN
               );
             } else {
@@ -161,6 +161,7 @@ export default {
               TELEGRAM_TOKEN
             );
             
+            // پردازش صف (بدون await)
             processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO).catch(err => console.error(err));
             return new Response('OK');
           }
@@ -176,6 +177,7 @@ export default {
 };
 
 async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO) {
+  console.log("processQueue started");
   let queue = await env.QUEUE.get('queue', 'json');
   if (!queue || queue.length === 0) return;
   
@@ -194,7 +196,6 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
   }
   
   const userId = `${chatId}_${Date.now()}`;
-  
   console.log(`Sending request to GitHub for user ${userId}`);
   
   const workflowResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
