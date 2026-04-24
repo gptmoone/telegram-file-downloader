@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر سریع - نسخه نهایی بدون خطا
+// ربات دانلودر نهایی - با پشتیبانی کامل از KV و GitHub
 // ==========================================
 
 async function sendMessage(chatId, text, keyboard, TELEGRAM_TOKEN) {
@@ -165,7 +165,8 @@ export default {
               TELEGRAM_TOKEN
             );
             
-            processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
+            // اجرای پردازش در پس‌زمینه (بدون await)
+            processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO).catch(err => console.error(err));
             return new Response('OK');
           }
         }
@@ -203,6 +204,7 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
   
   const userId = `${chatId}_${Date.now()}`;
   
+  // فراخوانی GitHub Actions
   const workflowResponse = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
     method: 'POST',
     headers: {
@@ -222,13 +224,14 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
   
   if (!workflowResponse.ok) {
     const errorText = await workflowResponse.text();
-    console.error(errorText);
+    console.error("GitHub API error:", errorText);
     await sendMessageSimple(chatId, "❌ خطا در ارتباط با گیت‌هاب. ممکن است توکن معتبر نباشد.", TELEGRAM_TOKEN);
     await removeFromQueue(env, chatId);
     await env.QUEUE.delete(`status:${chatId}`);
     return;
   }
   
+  // منتظر ماندن برای اتمام workflow (حداکثر 10 دقیقه)
   let branchName = null;
   for (let i = 0; i < 60; i++) {
     await sleep(10000);
@@ -245,7 +248,7 @@ async function processQueue(env, TELEGRAM_TOKEN, GITHUB_TOKEN, GITHUB_OWNER, GIT
     await env.QUEUE.put(`status:${chatId}`, 'done');
     await removeFromQueue(env, chatId);
   } else {
-    await sendMessageSimple(chatId, "❌ متأسفانه عملیات با خطا مواجه شد. لطفاً دقایقی دیگر تلاش کنید.", TELEGRAM_TOKEN);
+    await sendMessageSimple(chatId, "❌ متأسفانه عملیات با خطا مواجه شد (زمان انتظار تمام شد). لطفاً دقایقی دیگر تلاش کنید.", TELEGRAM_TOKEN);
     await env.QUEUE.delete(`status:${chatId}`);
     await removeFromQueue(env, chatId);
   }
@@ -262,11 +265,4 @@ async function removeFromQueue(env, chatId) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
-
-
-
-
-
-
-  
 }
