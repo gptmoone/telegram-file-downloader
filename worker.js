@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با قابلیت ریست دستی آمار
+// ربات دانلودر نهایی - با تلاش مجدد خودکار در صورت عدم شروع پردازش
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -10,6 +10,8 @@ const MAIN_KEYBOARD = {
   ]
 };
 const MAX_CONCURRENT = 10;
+const MAX_RETRIES = 3;
+const RETRY_INTERVAL = 30000; // 30 ثانیه
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -46,7 +48,6 @@ async function getStats(env) {
   let queueList = await env.QUEUE.get('queueList', 'json') || [];
   let totalBranches = await env.QUEUE.get('totalBranches', 'json') || 0;
   
-  // جلوگیری از نمایش مقدار غیرمنطقی
   if (activeCount > MAX_CONCURRENT || activeCount < 0) {
     activeCount = 0;
     await env.QUEUE.put('activeCount', 0);
@@ -109,6 +110,8 @@ export default {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
+        // ثبت زمان شروع برای جلوگیری از انتظار بیشتر
+        await env.QUEUE.put(`started:${chatId}`, Date.now().toString());
         await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد. این عملیات ممکن است چند دقیقه طول بکشد...", TOKEN);
       }
       return new Response('OK');
@@ -141,7 +144,8 @@ export default {
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <code>7-Zip</code> یا <code>WinRAR</code>، فایل <b>archive.7z.001</b> را باز کنید. نرم‌افزار به صورت خودکار همه تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.`, TOKEN);
         await env.QUEUE.delete(`request:${chatId}`);
-        
+        await env.QUEUE.delete(`started:${chatId}`);
+        await env.QUEUE.delete(`retry:${chatId}`);
         await this.finishTask(env);
       }
       return new Response('OK');
@@ -155,15 +159,10 @@ export default {
         await env.QUEUE.delete(`branch:${chatId}`);
         await env.QUEUE.delete(`last_branch:${chatId}`);
         await env.QUEUE.delete(`status:${chatId}`);
+        await env.QUEUE.delete(`started:${chatId}`);
+        await env.QUEUE.delete(`retry:${chatId}`);
       }
       return new Response('OK');
-    }
-
-    // ===== ریست دستی آمار (فقط با توکن ادمین) =====
-    // دستور: /resetstats <ADMIN_SECRET>
-    if (path === `/bot${TOKEN}` && request.method === 'POST') {
-      // برای جلوگیری از پیچیدگی، در بخش پیام متنی چک می‌کنیم
-      // به جای این endpoint جداگانه، داخل بخش پیام متنی handle می‌شود
     }
 
     // ===== وب‌هوک اصلی تلگرام =====
@@ -187,6 +186,8 @@ export default {
             await env.QUEUE.delete(`state:${chatId}`);
             await env.QUEUE.delete(`total_chunks:${chatId}`);
             await env.QUEUE.delete(`uploaded_chunks:${chatId}`);
+            await env.QUEUE.delete(`started:${chatId}`);
+            await env.QUEUE.delete(`retry:${chatId}`);
             await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
             await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
@@ -242,6 +243,8 @@ export default {
             await env.QUEUE.delete(`status:${chatId}`);
             await env.QUEUE.delete(`request:${chatId}`);
             await env.QUEUE.delete(`state:${chatId}`);
+            await env.QUEUE.delete(`started:${chatId}`);
+            await env.QUEUE.delete(`retry:${chatId}`);
             let q = await env.QUEUE.get('queueList', 'json') || [];
             await env.QUEUE.put('queueList', JSON.stringify(q.filter(i => i.chatId !== chatId)));
             await sendSimple(chatId, "❌ عملیات لغو شد.", TOKEN);
@@ -254,7 +257,7 @@ export default {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
 
-          // 👑 دستور مخفی ریست آمار
+          // دستور مخفی ریست آمار (اختیاری)
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             const adminSecret = env.ADMIN_SECRET;
@@ -272,6 +275,8 @@ export default {
           if (text === '/start') {
             await env.QUEUE.delete(`status:${chatId}`);
             await env.QUEUE.delete(`state:${chatId}`);
+            await env.QUEUE.delete(`started:${chatId}`);
+            await env.QUEUE.delete(`retry:${chatId}`);
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
@@ -317,7 +322,8 @@ export default {
             if (activeCount < MAX_CONCURRENT) {
               await env.QUEUE.put('activeCount', activeCount + 1);
               await env.QUEUE.put(`status:${chatId}`, 'processing');
-              this.runTask(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
+              // شروع فرآیند با قابلیت تلاش مجدد
+              this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...", TOKEN);
             } else {
               queueList.push({ chatId, fileUrl, password });
@@ -337,14 +343,58 @@ export default {
     return new Response('Bot is running');
   },
 
-  async runTask(chatId, fileUrl, password, env, TOKEN) {
+  // اجرای تسک با قابلیت تلاش مجدد خودکار
+  async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
     const userId = `${chatId}_${Date.now()}`;
+    let retryCount = 0;
+    let success = false;
+
+    while (retryCount < MAX_RETRIES && !success) {
+      // ارسال درخواست به گیت‌هاب
+      const ghRes = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN);
+      if (!ghRes) {
+        // خطا در ارسال، یک بار دیگر تلاش کن
+        retryCount++;
+        if (retryCount < MAX_RETRIES) {
+          await sendSimple(chatId, `⚠️ تلاش ${retryCount} ناموفق بود. تلاش مجدد در ${RETRY_INTERVAL/1000} ثانیه...`, TOKEN);
+          await new Promise(r => setTimeout(r, RETRY_INTERVAL));
+          continue;
+        } else {
+          await sendSimple(chatId, `❌ پس از ${MAX_RETRIES} تلاش، درخواست به گیت‌هاب ارسال نشد. لطفاً دوباره تلاش کنید.`, TOKEN);
+          await this.finishTask(env);
+          return;
+        }
+      }
+
+      // منتظر پیام شروع از سمت گیت‌هاب (حداکثر RETRY_INTERVAL ثانیه)
+      const started = await this.waitForStart(chatId, env, RETRY_INTERVAL);
+      if (started) {
+        success = true;
+        break;
+      } else {
+        retryCount++;
+        if (retryCount < MAX_RETRIES) {
+          await sendSimple(chatId, `⚠️ پردازش شروع نشد. تلاش مجدد ${retryCount} از ${MAX_RETRIES}...`, TOKEN);
+          // درخواست بعدی با همان userId فرستاده می‌شود (تکراری)
+        } else {
+          await sendSimple(chatId, `❌ پس از ${MAX_RETRIES} تلاش، پردازش آغاز نشد. لطفاً دوباره تلاش کنید.`, TOKEN);
+          await this.finishTask(env);
+          return;
+        }
+      }
+    }
+
+    // حالا که شروع شد، منتظر پایان باشیم (کار توسط endpoint /api/complete انجام می‌شود)
+    // فقط اگر timeout شد، finishTask اجرا می‌شود.
+  },
+
+  async sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN) {
     const GITHUB_TOKEN = env.GH_TOKEN;
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
 
     try {
-      const ghRes = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
         method: 'POST',
         headers: {
           'Authorization': `token ${GITHUB_TOKEN}`,
@@ -356,31 +406,28 @@ export default {
           inputs: { file_url: fileUrl, zip_password: password, user_id: userId }
         })
       });
-      if (!ghRes.ok) {
-        const errText = await ghRes.text();
-        console.error(`GitHub error: ${errText}`);
-        await sendSimple(chatId, `❌ خطا در ارتباط با گیت‌هاب (${ghRes.status}).`, TOKEN);
-        await this.finishTask(env);
-        return;
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`GitHub error ${res.status}: ${errText}`);
+        return null;
       }
-
-      // منتظر ماندن برای اتمام (حداکثر 60 دقیقه)
-      let branch = null;
-      for (let i = 0; i < 360; i++) {
-        await new Promise(r => setTimeout(r, 10000));
-        branch = await env.QUEUE.get(`branch:${chatId}`);
-        if (branch) break;
-      }
-      if (!branch) {
-        console.error(`Timeout waiting for branch for chat ${chatId}`);
-        await sendSimple(chatId, "❌ زمان انتظار برای پردازش فایل به پایان رسید. لطفاً دوباره تلاش کنید.", TOKEN);
-        await this.finishTask(env);
-      }
-    } catch (err) {
-      console.error(err);
-      await sendSimple(chatId, "❌ خطای داخلی.", TOKEN);
-      await this.finishTask(env);
+      return true;
+    } catch (e) {
+      console.error(e);
+      return null;
     }
+  },
+
+  async waitForStart(chatId, env, timeoutMs) {
+    const startKey = `started:${chatId}`;
+    await env.QUEUE.delete(startKey);
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      const started = await env.QUEUE.get(startKey);
+      if (started) return true;
+      await new Promise(r => setTimeout(r, 5000)); // هر 5 ثانیه چک کن
+    }
+    return false;
   },
 
   async finishTask(env) {
@@ -394,7 +441,9 @@ export default {
       await env.QUEUE.put('queueList', JSON.stringify(queueList));
       await env.QUEUE.put('activeCount', activeCount + 1);
       await env.QUEUE.put(`status:${next.chatId}`, 'processing');
-      this.runTask(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
+      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
     }
-  }
+  },
+
+  // لازم نیست تابع runTask قدیمی حذف شود، ولی از runTaskWithRetry استفاده می‌کنیم.
 };
