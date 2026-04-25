@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با اصلاح activeCount و وضعیت
+// ربات دانلودر نهایی - با قابلیت ریست دستی آمار
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -9,6 +9,7 @@ const MAIN_KEYBOARD = {
     [{ text: "❓ راهنما", callback_data: "help" }, { text: "🚫 لغو درخواست", callback_data: "cancel" }]
   ]
 };
+const MAX_CONCURRENT = 10;
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -44,6 +45,12 @@ async function getStats(env) {
   let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
   let queueList = await env.QUEUE.get('queueList', 'json') || [];
   let totalBranches = await env.QUEUE.get('totalBranches', 'json') || 0;
+  
+  // جلوگیری از نمایش مقدار غیرمنطقی
+  if (activeCount > MAX_CONCURRENT || activeCount < 0) {
+    activeCount = 0;
+    await env.QUEUE.put('activeCount', 0);
+  }
   return { totalUsers, activeCount, waiting: queueList.length, totalBranches };
 }
 
@@ -135,7 +142,6 @@ export default {
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.`, TOKEN);
         await env.QUEUE.delete(`request:${chatId}`);
         
-        // 🔧 کاهش activeCount و اجرای تسک بعدی
         await this.finishTask(env);
       }
       return new Response('OK');
@@ -151,6 +157,13 @@ export default {
         await env.QUEUE.delete(`status:${chatId}`);
       }
       return new Response('OK');
+    }
+
+    // ===== ریست دستی آمار (فقط با توکن ادمین) =====
+    // دستور: /resetstats <ADMIN_SECRET>
+    if (path === `/bot${TOKEN}` && request.method === 'POST') {
+      // برای جلوگیری از پیچیدگی، در بخش پیام متنی چک می‌کنیم
+      // به جای این endpoint جداگانه، داخل بخش پیام متنی handle می‌شود
     }
 
     // ===== وب‌هوک اصلی تلگرام =====
@@ -169,14 +182,11 @@ export default {
           await answerCallback(cb.id, TOKEN).catch(e => console.error(e));
 
           if (data === 'new_link') {
-            // 🔧 ریست کامل وضعیت کاربر بدون نیاز به لغو دستی
-            // ابتدا وضعیت قبلی را پاک می‌کنیم
             await env.QUEUE.delete(`status:${chatId}`);
             await env.QUEUE.delete(`request:${chatId}`);
             await env.QUEUE.delete(`state:${chatId}`);
             await env.QUEUE.delete(`total_chunks:${chatId}`);
             await env.QUEUE.delete(`uploaded_chunks:${chatId}`);
-            // حذف شاخه قبلی از گیت‌هاب
             await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
             await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
@@ -244,8 +254,22 @@ export default {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
 
+          // 👑 دستور مخفی ریست آمار
+          if (text.startsWith('/resetstats')) {
+            const secret = text.split(' ')[1];
+            const adminSecret = env.ADMIN_SECRET;
+            if (adminSecret && secret === adminSecret) {
+              await env.QUEUE.put('activeCount', 0);
+              await env.QUEUE.put('queueList', JSON.stringify([]));
+              await env.QUEUE.put('totalBranches', 0);
+              await sendSimple(chatId, "✅ آمار ربات بازنشانی شد.\n`activeCount` = 0، صف خالی شد.", TOKEN);
+            } else {
+              await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN);
+            }
+            return new Response('OK');
+          }
+
           if (text === '/start') {
-            // ریست وضعیت در استارت هم انجام شود
             await env.QUEUE.delete(`status:${chatId}`);
             await env.QUEUE.delete(`state:${chatId}`);
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
@@ -287,7 +311,6 @@ export default {
             await env.QUEUE.delete(`state:${chatId}`);
             await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password }));
 
-            const MAX_CONCURRENT = 10;
             let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
             let queueList = await env.QUEUE.get('queueList', 'json') || [];
 
@@ -341,20 +364,18 @@ export default {
         return;
       }
 
-      // منتظر ماندن برای اتمام (بدون تایم اوت سخت، اما حداکثر 60 دقیقه)
+      // منتظر ماندن برای اتمام (حداکثر 60 دقیقه)
       let branch = null;
-      for (let i = 0; i < 360; i++) { // 360 * 10 ثانیه = 60 دقیقه
+      for (let i = 0; i < 360; i++) {
         await new Promise(r => setTimeout(r, 10000));
         branch = await env.QUEUE.get(`branch:${chatId}`);
         if (branch) break;
       }
       if (!branch) {
-        // timeout شد، باید تسک را تمام کنیم
         console.error(`Timeout waiting for branch for chat ${chatId}`);
         await sendSimple(chatId, "❌ زمان انتظار برای پردازش فایل به پایان رسید. لطفاً دوباره تلاش کنید.", TOKEN);
         await this.finishTask(env);
       }
-      // اگر branch پیدا شد، finishTask توسط /api/complete انجام می‌شود، اینجا کاری نمی‌کنیم
     } catch (err) {
       console.error(err);
       await sendSimple(chatId, "❌ خطای داخلی.", TOKEN);
