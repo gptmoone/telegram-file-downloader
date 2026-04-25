@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - مقاوم در برابر محدودیت KV با پاسخ فوری دکمه‌ها
+// ربات دانلودر نهایی - کاهش حداکثری delete و مقاوم در برابر محدودیت KV
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -23,7 +23,7 @@ const REPO_SIZE_WARNING_GB = 75;
 
 let statsCache = { data: null, expires: 0 };
 let userCheckCache = new Map();
-let kvLimitWarningFlag = false;  // برای نمایش اخطار محدودیت KV به کاربر
+let kvLimitWarningFlag = false;
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -51,7 +51,7 @@ async function answerCallback(callbackId, TOKEN) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ callback_query_id: callbackId })
-  });
+  }).catch(e => console.error('answerCallback error:', e));
 }
 
 async function getRepoSize(env) {
@@ -92,15 +92,13 @@ async function getStats(env) {
     if (realActive !== activeCount) await env.QUEUE.put('activeCount', realActive);
     
     const result = { totalUsers, activeCount: realActive, waiting: queueListRaw.length, totalLinks: totalBranches, totalVolume: totalVolume };
-    statsCache = { data: result, expires: now + 60000 }; // کش 60 ثانیه
+    statsCache = { data: result, expires: now + 60000 };
     kvLimitWarningFlag = false;
     return result;
   } catch (err) {
     console.error('KV read error in getStats:', err);
     kvLimitWarningFlag = true;
-    // اگر کش قبلی وجود دارد، آن را برگردان (حتی اگر منقضی شده باشد)
     if (statsCache.data) return statsCache.data;
-    // در غیر این صورت مقادیر پیش‌فرض (بدون آمار)
     return { totalUsers: 0, activeCount: 0, waiting: 0, totalLinks: 0, totalVolume: 0 };
   }
 }
@@ -192,7 +190,7 @@ export default {
       if (user_id && branch) {
         const chatId = user_id.split('_')[0];
         await env.QUEUE.put(`branch:${chatId}`, branch, { expirationTtl: 10800 });
-        await env.QUEUE.put(`status:${chatId}`, 'done');
+        await env.QUEUE.put(`status:${chatId}`, 'done', { expirationTtl: 10800 });
         await env.QUEUE.put(`last_branch:${chatId}`, branch);
         
         let total = await env.QUEUE.get('totalBranches', 'json') || 0;
@@ -253,33 +251,37 @@ export default {
         if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
         if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
 
-        // ========== دکمه‌ها (پاسخ فوری + مدیریت خطاهای KV) ==========
+        // ========== دکمه‌ها (پاسخ فوری + تحمل خطای delete) ==========
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id;
           const data = cb.data;
 
-          // پاسخ فوری به تلگرام (بدون await)
-          answerCallback(cb.id, TOKEN).catch(e => console.error('answerCallback error:', e));
+          // پاسخ فوری به تلگرام
+          answerCallback(cb.id, TOKEN);
 
-          // پردازش هر دکمه در پس‌زمینه با try-catch
+          // پردازش پس‌زمینه با try-catch
           if (data === 'new_link') {
             (async () => {
               try {
-                await Promise.all([
+                // فقط کلیدهای ضروری را حذف می‌کنیم (status, request, started)
+                // اگر delete خطا داد، نادیده می‌گیریم و ادامه می‌دهیم
+                await Promise.allSettled([
                   env.QUEUE.delete(`status:${chatId}`),
                   env.QUEUE.delete(`request:${chatId}`),
-                  env.QUEUE.delete(`state:${chatId}`),
-                  env.QUEUE.delete(`total_chunks:${chatId}`),
-                  env.QUEUE.delete(`uploaded_chunks:${chatId}`),
                   env.QUEUE.delete(`started:${chatId}`)
                 ]);
-                await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
-                await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
+                // این کلیدها TTL دارند و حذفشان ضروری نیست، فقط برای آزادسازی سریع تلاش می‌کنیم
+                await Promise.allSettled([
+                  env.QUEUE.delete(`state:${chatId}`),
+                  env.QUEUE.delete(`total_chunks:${chatId}`),
+                  env.QUEUE.delete(`uploaded_chunks:${chatId}`)
+                ]);
               } catch (err) {
-                console.error('Error in new_link:', err);
-                await sendSimple(chatId, "⚠️ عملیات با مشکل مواجه شد. لطفاً دوباره تلاش کنید.", TOKEN);
+                console.error('Delete error in new_link (ignored):', err);
               }
+              await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
+              await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
             })().catch(e => console.error(e));
           }
           else if (data === 'help') {
@@ -358,12 +360,10 @@ export default {
               try {
                 const branchDeleted = await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
                 if (branchDeleted) {
-                  await Promise.all([
+                  await Promise.allSettled([
                     env.QUEUE.delete(`status:${chatId}`),
                     env.QUEUE.delete(`request:${chatId}`),
                     env.QUEUE.delete(`branch:${chatId}`),
-                    env.QUEUE.delete(`total_chunks:${chatId}`),
-                    env.QUEUE.delete(`uploaded_chunks:${chatId}`),
                     env.QUEUE.delete(`started:${chatId}`)
                   ]);
                   await sendSimple(chatId, "✅ فایل شما از سرور حذف شد. با تشکر از همکاری شما برای مدیریت حجم مخزن.", TOKEN);
@@ -379,7 +379,7 @@ export default {
           else if (data === 'cancel' || data === 'cancel_input') {
             (async () => {
               try {
-                await Promise.all([
+                await Promise.allSettled([
                   env.QUEUE.delete(`status:${chatId}`),
                   env.QUEUE.delete(`request:${chatId}`),
                   env.QUEUE.delete(`state:${chatId}`),
@@ -418,7 +418,7 @@ export default {
 
           if (text === '/start') {
             try {
-              await Promise.all([
+              await Promise.allSettled([
                 env.QUEUE.delete(`status:${chatId}`),
                 env.QUEUE.delete(`state:${chatId}`),
                 env.QUEUE.delete(`started:${chatId}`)
@@ -481,13 +481,13 @@ export default {
 
             if (activeCount < MAX_CONCURRENT) {
               await env.QUEUE.put('activeCount', activeCount + 1);
-              await env.QUEUE.put(`status:${chatId}`, 'processing');
+              await env.QUEUE.put(`status:${chatId}`, 'processing', { expirationTtl: 7200 });
               this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
             } else {
               queueList.push({ chatId, fileUrl, password, fileSize });
               await env.QUEUE.put('queueList', JSON.stringify(queueList));
-              await env.QUEUE.put(`status:${chatId}`, 'waiting');
+              await env.QUEUE.put(`status:${chatId}`, 'waiting', { expirationTtl: 7200 });
               await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueList.length}`, TOKEN);
             }
             return new Response('OK');
@@ -576,7 +576,7 @@ export default {
       const next = queueList.shift();
       await env.QUEUE.put('queueList', JSON.stringify(queueList));
       await env.QUEUE.put('activeCount', activeCount + 1);
-      await env.QUEUE.put(`status:${next.chatId}`, 'processing');
+      await env.QUEUE.put(`status:${next.chatId}`, 'processing', { expirationTtl: 7200 });
       this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
     }
   }
