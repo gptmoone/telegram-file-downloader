@@ -1,12 +1,13 @@
 // ==========================================
-// ربات دانلودر نهایی - فوق‌بهینه با متن‌های کامل
+// ربات دانلودر نهایی - با بررسی حجم مخزن و حذف دستی فایل
 // ==========================================
 
 const MAIN_KEYBOARD = {
   inline_keyboard: [
     [{ text: "📥 لینک جدید", callback_data: "new_link" }],
     [{ text: "📊 آمار لحظه‌ای", callback_data: "stats" }, { text: "📊 وضعیت من", callback_data: "status" }],
-    [{ text: "❓ راهنما", callback_data: "help" }, { text: "🚫 لغو درخواست", callback_data: "cancel" }]
+    [{ text: "❓ راهنما", callback_data: "help" }, { text: "🗑️ حذف فایل من", callback_data: "delete_my_file" }],
+    [{ text: "🚫 لغو درخواست", callback_data: "cancel" }]
   ]
 };
 const MAX_CONCURRENT = 10;
@@ -14,7 +15,9 @@ const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
 const START_WAIT_INTERVAL = 15000;
 const MAX_START_WAIT_ATTEMPTS = 3;
-const TASK_TIMEOUT = 15 * 60 * 1000;       // 15 دقیقه
+const TASK_TIMEOUT = 15 * 60 * 1000;
+const REPO_SIZE_LIMIT_GB = 80;     // حداکثر حجم مجاز مخزن (گیگابایت)
+const REPO_SIZE_WARNING_GB = 75;   // آستانه هشدار (گیگابایت)
 
 let statsCache = { data: null, expires: 0 };
 let userCheckCache = new Map();
@@ -46,6 +49,30 @@ async function answerCallback(callbackId, TOKEN) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ callback_query_id: callbackId })
   });
+}
+
+// ----- بررسی حجم مخزن از GitHub API -----
+async function getRepoSize(env) {
+  const GITHUB_TOKEN = env.GH_TOKEN;
+  const GITHUB_OWNER = 'gptmoone';
+  const GITHUB_REPO = 'telegram-file-downloader';
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}`, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'CloudflareWorkerBot/1.0'
+      }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      // size در پاسخ بر حسب کیلوبایت است
+      const sizeKB = data.size;
+      const sizeGB = sizeKB / (1024 * 1024);
+      return sizeGB;
+    }
+  } catch (e) { console.error('getRepoSize error:', e); }
+  return 0;
 }
 
 async function getStats(env) {
@@ -95,7 +122,7 @@ async function getFileSize(url) {
 
 async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO) {
   const branchName = await env.QUEUE.get(`last_branch:${chatId}`);
-  if (!branchName) return;
+  if (!branchName) return false;
   try {
     const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branchName}`, {
       method: 'DELETE',
@@ -109,9 +136,11 @@ async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_
       let total = await env.QUEUE.get('totalBranches', 'json') || 0;
       if (total > 0) await env.QUEUE.put('totalBranches', total - 1);
       statsCache.expires = 0;
+      await env.QUEUE.delete(`last_branch:${chatId}`);
+      return true;
     }
-    await env.QUEUE.delete(`last_branch:${chatId}`);
   } catch (e) { console.error('Delete branch error:', e); }
+  return false;
 }
 
 export default {
@@ -122,6 +151,7 @@ export default {
     const GITHUB_TOKEN = env.GH_TOKEN;
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
+    const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
@@ -157,7 +187,7 @@ export default {
         const password = requestData?.password || '';
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
-        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.`, TOKEN);
+        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید تا دیگران هم بتوانند از سرویس استفاده کنند.`, TOKEN);
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
         await this.finishTask(env);
@@ -211,7 +241,8 @@ export default {
               `1️⃣ اگر لینک مستقیم ندارید، فایل خود را به ربات <code>@filesto_bot</code> فوروارد کنید.\n` +
               `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
               `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
-              `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n\n` +
+              `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n` +
+              `5️⃣ پس از دانلود، روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور حذف شود و دیگران هم بتوانند استفاده کنند.\n\n` +
               `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
               `• فایل ZIP دانلود شده را با نرم‌افزارهایی مثل <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
               `• داخل پوشه استخراج شده، فایل‌هایی با پسوند <code>.001</code>، <code>.002</code> و ... می‌بینید.\n` +
@@ -227,7 +258,12 @@ export default {
           }
           else if (data === 'stats') {
             const stats = await getStats(env);
-            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n📁 فایل‌های فعال روی سرور: ${stats.totalBranches}\n\n📢 @maramivpn`, TOKEN);
+            const repoSize = await getRepoSize(env);
+            const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
+            let warningMsg = '';
+            if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن به حد مجاز رسیده است. لطفاً فایل‌های خود را حذف کنید تا امکان استفاده برای دیگران باقی بماند.</b>';
+            else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
+            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n📁 فایل‌های فعال روی سرور: ${stats.totalBranches}${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
           }
           else if (data === 'status') {
             const status = await env.QUEUE.get(`status:${chatId}`);
@@ -244,12 +280,29 @@ export default {
               const branch = await env.QUEUE.get(`branch:${chatId}`);
               if (branch) {
                 const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
-                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود:\n${link}`, TOKEN);
+                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود:\n${link}\n\n🗑️ پس از دانلود، از دکمه «حذف فایل من» برای پاک کردن آن استفاده کنید.`, TOKEN);
               } else {
                 await sendSimple(chatId, "درخواستی یافت نشد.", TOKEN);
               }
             } else {
               await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
+            }
+          }
+          else if (data === 'delete_my_file') {
+            // حذف فایل کاربر
+            const branchDeleted = await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
+            if (branchDeleted) {
+              await Promise.all([
+                env.QUEUE.delete(`status:${chatId}`),
+                env.QUEUE.delete(`request:${chatId}`),
+                env.QUEUE.delete(`branch:${chatId}`),
+                env.QUEUE.delete(`total_chunks:${chatId}`),
+                env.QUEUE.delete(`uploaded_chunks:${chatId}`),
+                env.QUEUE.delete(`started:${chatId}`)
+              ]);
+              await sendSimple(chatId, "✅ فایل شما از سرور حذف شد. با تشکر از همکاری شما برای مدیریت حجم مخزن.", TOKEN);
+            } else {
+              await sendSimple(chatId, "❌ هیچ فایل فعالی برای حذف یافت نشد (یا قبلاً حذف شده است).", TOKEN);
             }
           }
           else if (data === 'cancel' || data === 'cancel_input') {
@@ -270,6 +323,20 @@ export default {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
 
+          if (text.startsWith('/resetstats')) {
+            const secret = text.split(' ')[1];
+            if (ADMIN_SECRET && secret === ADMIN_SECRET) {
+              await env.QUEUE.put('activeCount', 0);
+              await env.QUEUE.put('queueList', JSON.stringify([]));
+              await env.QUEUE.put('totalBranches', 0);
+              statsCache.expires = 0;
+              await sendSimple(chatId, "✅ آمار ربات بازنشانی شد.\n`activeCount` = 0، صف خالی شد.", TOKEN);
+            } else {
+              await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN);
+            }
+            return new Response('OK');
+          }
+
           if (text === '/start') {
             await Promise.all([
               env.QUEUE.delete(`status:${chatId}`),
@@ -281,6 +348,9 @@ export default {
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
               `⚠️ <b>هشدار امنیتی:</b>\n` +
               `فایل‌های شما در یک مخزن <b>عمومی</b> گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n\n` +
+              `⚠️ <b>مدیریت حجم مخزن:</b>\n` +
+              `• پس از دانلود فایل خود، حتماً روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n` +
+              `• این کار به همه اجازه می‌دهد از سرویس استفاده کنند و حجم مخزن کنترل شود.\n\n` +
               `⚠️ لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n\n` +
               `📢 حمایت: @maramivpn`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
@@ -296,6 +366,15 @@ export default {
           const userStateRaw = await env.QUEUE.get(`state:${chatId}`);
           if (!userStateRaw) {
             if (text.match(/^https?:\/\//)) {
+              // قبل از پذیرش لینک جدید، حجم مخزن را بررسی کن
+              const repoSize = await getRepoSize(env);
+              if (repoSize >= REPO_SIZE_LIMIT_GB) {
+                await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده است. لطفاً چند ساعت بعد تلاش کنید یا از دیگر کاربران بخواهید فایل‌های خود را حذف کنند.\n\n📊 حجم فعلی: ${repoSize.toFixed(1)} گیگابایت`, TOKEN);
+                return new Response('OK');
+              } else if (repoSize >= REPO_SIZE_WARNING_GB) {
+                await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). لطفاً پس از دانلود فایل خود، آن را حذف کنید تا دیگران هم بتوانند استفاده کنند.`, TOKEN);
+                // ادامه پردازش عادی
+              }
               const fileSize = await getFileSize(text);
               if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
                 await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
@@ -375,7 +454,6 @@ export default {
       await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
     }
 
-    // انتظار برای اتمام (با تایم‌اوت کلی)
     let branch = null;
     const deadline = Date.now() + TASK_TIMEOUT;
     while (Date.now() < deadline && !branch) {
