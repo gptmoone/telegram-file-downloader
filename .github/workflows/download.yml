@@ -39,7 +39,6 @@ jobs:
 
       - name: Download file with original name
         run: |
-          # استخراج نام اصلی فایل از لینک
           ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
           if [ -z "$ORIGINAL_NAME" ]; then
             ORIGINAL_NAME="downloaded_file"
@@ -47,9 +46,8 @@ jobs:
           echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
           curl -L --fail --retry 3 -o "$ORIGINAL_NAME" "${{ github.event.inputs.file_url }}"
 
-      - name: Create archive chunks with original filename preserved
+      - name: Create archive chunks (95MB each)
         run: |
-          # ساخت آرشیو 7z با حفظ نام فایل اصلی
           7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" "${{ env.ORIGINAL_NAME }}"
 
       - name: Clean up original file
@@ -78,7 +76,6 @@ jobs:
           git checkout --orphan "$BRANCH_NAME"
           git rm -rf --ignore-unmatch . 2>/dev/null || true
           echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
-          # اضافه کردن تدریجی تکه‌ها (هر بار ۲ تکه)
           chunks=(archive.7z.*)
           total=${#chunks[@]}
           batch_size=2
@@ -110,8 +107,15 @@ jobs:
           done
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
-      - name: Notify Worker that job is done
+      - name: Notify Worker that job is done (success)
         run: |
           curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\"}"
+
+      - name: Notify Worker on failure
+        if: failure()
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
