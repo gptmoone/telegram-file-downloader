@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با اصلاح پیام استارت (نمایش همیشگی پیام خوش‌آمد)
+// ربات دانلودر نهایی - پاسخ فوری به دکمه‌ها و بهینه KV
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -237,24 +237,29 @@ export default {
         if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
         if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
 
-        // دکمه‌ها
+        // دکمه‌ها (Callback Query) - پاسخ فوری
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id;
           const data = cb.data;
-          await answerCallback(cb.id, TOKEN).catch(e => console.error(e));
 
+          // پاسخ فوری به تلگرام (بدون await)
+          answerCallback(cb.id, TOKEN).catch(e => console.error('answerCallback error:', e));
+
+          // پردازش در پس‌زمینه (fire-and-forget)
           if (data === 'new_link') {
-            await Promise.all([
+            Promise.all([
               env.QUEUE.delete(`status:${chatId}`),
               env.QUEUE.delete(`request:${chatId}`),
               env.QUEUE.delete(`state:${chatId}`),
               env.QUEUE.delete(`total_chunks:${chatId}`),
               env.QUEUE.delete(`uploaded_chunks:${chatId}`),
               env.QUEUE.delete(`started:${chatId}`)
-            ]);
-            await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
-            await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
+            ]).catch(e => console.error(e));
+            deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO)
+              .catch(e => console.error(e));
+            sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN)
+              .catch(e => console.error(e));
           }
           else if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
@@ -276,66 +281,72 @@ export default {
               `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n` +
               `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
               `❤️ <b>حمایت:</b> عضو کانال ما شوید: @maramivpn`;
-            await sendSimple(chatId, helpText, TOKEN);
+            sendSimple(chatId, helpText, TOKEN).catch(e => console.error(e));
           }
           else if (data === 'stats') {
-            const stats = await getStats(env);
-            const repoSize = await getRepoSize(env);
-            const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
-            let warningMsg = '';
-            if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن به حد مجاز رسیده است. لطفاً فایل‌های خود را حذف کنید تا امکان استفاده برای دیگران باقی بماند.</b>';
-            else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
-            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
+            (async () => {
+              const stats = await getStats(env);
+              const repoSize = await getRepoSize(env);
+              const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
+              let warningMsg = '';
+              if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن به حد مجاز رسیده است. لطفاً فایل‌های خود را حذف کنید تا امکان استفاده برای دیگران باقی بماند.</b>';
+              else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
+              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
+            })().catch(e => console.error(e));
           }
           else if (data === 'status') {
-            const status = await env.QUEUE.get(`status:${chatId}`);
-            const total = await env.QUEUE.get(`total_chunks:${chatId}`, 'json');
-            const uploaded = await env.QUEUE.get(`uploaded_chunks:${chatId}`, 'json');
-            let progress = (total && uploaded) ? `\n📦 پیشرفت آپلود: ${uploaded} از ${total} تکه (${Math.round(uploaded/total*100)}%)` : '';
-            if (status === 'processing') {
-              await sendSimple(chatId, `🔄 وضعیت: در حال پردازش...${progress}`, TOKEN);
-            } else if (status === 'waiting') {
-              let q = await env.QUEUE.get('queueList', 'json') || [];
-              let pos = q.findIndex(i => i.chatId === chatId) + 1;
-              await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos > 0 ? pos : '?'})`, TOKEN);
-            } else if (status === 'done') {
-              const branch = await env.QUEUE.get(`branch:${chatId}`);
-              if (branch) {
-                const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
-                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود:\n${link}\n\n🗑️ پس از دانلود، از دکمه «حذف فایل من» برای پاک کردن آن استفاده کنید.`, TOKEN);
+            (async () => {
+              const status = await env.QUEUE.get(`status:${chatId}`);
+              const total = await env.QUEUE.get(`total_chunks:${chatId}`, 'json');
+              const uploaded = await env.QUEUE.get(`uploaded_chunks:${chatId}`, 'json');
+              let progress = (total && uploaded) ? `\n📦 پیشرفت آپلود: ${uploaded} از ${total} تکه (${Math.round(uploaded/total*100)}%)` : '';
+              if (status === 'processing') {
+                await sendSimple(chatId, `🔄 وضعیت: در حال پردازش...${progress}`, TOKEN);
+              } else if (status === 'waiting') {
+                let q = await env.QUEUE.get('queueList', 'json') || [];
+                let pos = q.findIndex(i => i.chatId === chatId) + 1;
+                await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos > 0 ? pos : '?'})`, TOKEN);
+              } else if (status === 'done') {
+                const branch = await env.QUEUE.get(`branch:${chatId}`);
+                if (branch) {
+                  const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
+                  await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود:\n${link}\n\n🗑️ پس از دانلود، از دکمه «حذف فایل من» برای پاک کردن آن استفاده کنید.`, TOKEN);
+                } else {
+                  await sendSimple(chatId, "درخواستی یافت نشد.", TOKEN);
+                }
               } else {
-                await sendSimple(chatId, "درخواستی یافت نشد.", TOKEN);
+                await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
               }
-            } else {
-              await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
-            }
+            })().catch(e => console.error(e));
           }
           else if (data === 'delete_my_file') {
-            const branchDeleted = await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
-            if (branchDeleted) {
-              await Promise.all([
-                env.QUEUE.delete(`status:${chatId}`),
-                env.QUEUE.delete(`request:${chatId}`),
-                env.QUEUE.delete(`branch:${chatId}`),
-                env.QUEUE.delete(`total_chunks:${chatId}`),
-                env.QUEUE.delete(`uploaded_chunks:${chatId}`),
-                env.QUEUE.delete(`started:${chatId}`)
-              ]);
-              await sendSimple(chatId, "✅ فایل شما از سرور حذف شد. با تشکر از همکاری شما برای مدیریت حجم مخزن.", TOKEN);
-            } else {
-              await sendSimple(chatId, "❌ هیچ فایل فعالی برای حذف یافت نشد (یا قبلاً حذف شده است).", TOKEN);
-            }
+            (async () => {
+              const branchDeleted = await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
+              if (branchDeleted) {
+                await Promise.all([
+                  env.QUEUE.delete(`status:${chatId}`),
+                  env.QUEUE.delete(`request:${chatId}`),
+                  env.QUEUE.delete(`branch:${chatId}`),
+                  env.QUEUE.delete(`total_chunks:${chatId}`),
+                  env.QUEUE.delete(`uploaded_chunks:${chatId}`),
+                  env.QUEUE.delete(`started:${chatId}`)
+                ]);
+                await sendSimple(chatId, "✅ فایل شما از سرور حذف شد. با تشکر از همکاری شما برای مدیریت حجم مخزن.", TOKEN);
+              } else {
+                await sendSimple(chatId, "❌ هیچ فایل فعالی برای حذف یافت نشد (یا قبلاً حذف شده است).", TOKEN);
+              }
+            })().catch(e => console.error(e));
           }
           else if (data === 'cancel' || data === 'cancel_input') {
-            await Promise.all([
+            Promise.all([
               env.QUEUE.delete(`status:${chatId}`),
               env.QUEUE.delete(`request:${chatId}`),
               env.QUEUE.delete(`state:${chatId}`),
               env.QUEUE.delete(`started:${chatId}`)
-            ]);
+            ]).catch(e => console.error(e));
             let q = await env.QUEUE.get('queueList', 'json') || [];
-            await env.QUEUE.put('queueList', JSON.stringify(q.filter(i => i.chatId !== chatId)));
-            await sendSimple(chatId, "❌ عملیات لغو شد.", TOKEN);
+            env.QUEUE.put('queueList', JSON.stringify(q.filter(i => i.chatId !== chatId))).catch(e => console.error(e));
+            sendSimple(chatId, "❌ عملیات لغو شد.", TOKEN).catch(e => console.error(e));
           }
           return new Response('OK');
         }
@@ -358,19 +369,14 @@ export default {
             return new Response('OK');
           }
 
-          // ========== دستور استارت - همیشه پیام خوش‌آمد نمایش داده می‌شود ==========
           if (text === '/start') {
-            // پاکسازی کلیدها (در صورت خطا، فقط لاگ می‌شود)
             try {
               await Promise.all([
                 env.QUEUE.delete(`status:${chatId}`),
                 env.QUEUE.delete(`state:${chatId}`),
                 env.QUEUE.delete(`started:${chatId}`)
               ]);
-            } catch (err) {
-              console.error(`Error cleaning keys for /start for chat ${chatId}:`, err);
-            }
-            
+            } catch (err) { console.error(err); }
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
@@ -384,7 +390,6 @@ export default {
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
-          // ================================================================
 
           let status = await env.QUEUE.get(`status:${chatId}`);
           if (status && status !== 'done' && status !== 'cancelled') {
