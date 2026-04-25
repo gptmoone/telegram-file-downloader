@@ -13,23 +13,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}   # استفاده از توکن شخصی برای دسترسی write
 
       - name: Delete branches older than 3 hours
         run: |
-          # محاسبه تایم‌استمپ 3 ساعت قبل
           THREE_HOURS_AGO=$(date -d '3 hours ago' +%s)
           echo "Deleting branches created before $(date -d @$THREE_HOURS_AGO)"
 
-          # دریافت لیست شاخه‌های راه دور با الگوی user_
           git branch -r | grep 'origin/user_' | while read branch; do
-            # استخراج timestamp از نام شاخه (بعد از آخرین زیرخط)
             timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
             if [ -n "$timestamp" ]; then
               if [ "$timestamp" -lt "$THREE_HOURS_AGO" ]; then
                 branch_name=${branch#origin/}
                 echo "Deleting branch: $branch_name (created at $timestamp)"
                 git push origin --delete "$branch_name"
-                # اطلاع به Worker برای پاک کردن رکوردهای D1
                 USER_ID=$(echo "$branch_name" | sed 's/user_\(.*\)_.*/\1/')
                 curl -s -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup" \
                   -H "Content-Type: application/json" \
