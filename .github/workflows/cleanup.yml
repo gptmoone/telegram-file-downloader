@@ -2,7 +2,7 @@ name: Clean expired branches
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # هر 30 دقیقه یکبار
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,21 +14,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Delete branches older than 3 hours
+      - name: Delete branches older than 3 hours and clean D1
         run: |
           NOW=$(date +%s)
           THREE_HOURS_AGO=$((NOW - 10800))
           git branch -r | grep 'origin/user_' | while read branch; do
-            # استخراج timestamp از نام برنچ (فرض می‌کنیم آخرین عدد بعد از آخرین آندرلاین)
             timestamp=$(echo "$branch" | grep -oP 'user_.*_\K\d+')
             if [[ -n "$timestamp" ]] && [[ "$timestamp" -lt "$THREE_HOURS_AGO" ]]; then
               branch_name=${branch#origin/}
-              echo "Deleting expired branch: $branch_name (age: $((NOW - timestamp)) seconds)"
+              echo "Deleting $branch_name (created at $timestamp)"
               git push origin --delete "$branch_name"
-              # اطلاع به Worker برای پاک کردن اطلاعات KV مربوط به این کاربر
-              USER_ID=$(echo "$branch_name" | sed 's/user_\(.*\)_.*/\1/')
+              # حذف از D1 از طریق Worker API
               curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup" \
                 -H "Content-Type: application/json" \
-                -d "{\"user_id\":\"$USER_ID\"}"
+                -d "{\"user_id\":\"$(echo $branch_name | sed 's/user_\(.*\)_.*/\1/')\"}"
             fi
           done
