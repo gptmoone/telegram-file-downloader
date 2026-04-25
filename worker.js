@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر - حذف خودکار درخواست قبلی بدون اخطار
+// ربات دانلودر - نسخه نهایی با D1 (بدون KV)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -73,53 +73,121 @@ async function getRepoSize(env) {
   return 0;
 }
 
-async function getStats(env) {
+// ========== توابع کمکی D1 ==========
+async function dbGetUser(env, chatId) {
+  const stmt = await env.DB.prepare('SELECT * FROM users WHERE chat_id = ?').bind(chatId);
+  const { results } = await stmt.all();
+  return results[0];
+}
+async function dbAddUser(env, chatId) {
   const now = Date.now();
-  if (statsCache.data && statsCache.expires > now) return statsCache.data;
-  try {
-    const [totalUsers, activeCount, queueListRaw, totalBranches, totalVolume] = await Promise.all([
-      env.QUEUE.get('totalUsers', 'json').then(v => v || 0).catch(() => 0),
-      env.QUEUE.get('activeCount', 'json').then(v => v || 0).catch(() => 0),
-      env.QUEUE.get('queueList', 'json').then(v => v || []).catch(() => []),
-      env.QUEUE.get('totalBranches', 'json').then(v => v || 0).catch(() => 0),
-      env.QUEUE.get('totalVolume', 'json').then(v => v || 0).catch(() => 0)
-    ]);
-    let realActive = activeCount;
-    if (realActive > MAX_CONCURRENT || realActive < 0) realActive = 0;
-    if (realActive !== activeCount) await env.QUEUE.put('activeCount', realActive).catch(() => {});
-    const result = {
-      totalUsers: totalUsers || 0,
-      activeCount: realActive,
-      waiting: (queueListRaw || []).length,
-      totalLinks: totalBranches || 0,
-      totalVolume: totalVolume || 0
-    };
-    statsCache = { data: result, expires: now + 60000 };
-    return result;
-  } catch (err) {
-    console.error('getStats error:', err);
-    if (statsCache.data) return statsCache.data;
-    return { totalUsers: 0, activeCount: 0, waiting: 0, totalLinks: 0, totalVolume: 0 };
-  }
+  await env.DB.prepare('INSERT OR IGNORE INTO users (chat_id, first_seen) VALUES (?, ?)').bind(chatId, now).run();
+  // بدست آوردن تعداد کل کاربران
+  const { results } = await env.DB.prepare('SELECT COUNT(*) as count FROM users').all();
+  return results[0].count;
+}
+async function dbGetGlobalStats(env) {
+  const { results } = await env.DB.prepare('SELECT total_links, total_volume_gb FROM global_stats WHERE id = 1').all();
+  if (results.length === 0) return { total_links: 0, total_volume_gb: 0 };
+  return results[0];
+}
+async function dbIncrementLinks(env, volumeGB) {
+  await env.DB.prepare('UPDATE global_stats SET total_links = total_links + 1, total_volume_gb = total_volume_gb + ? WHERE id = 1').bind(volumeGB).run();
+}
+async function dbGetUserState(env, chatId) {
+  const { results } = await env.DB.prepare('SELECT status, request_data, branch_name, started_at, total_chunks, uploaded_chunks FROM user_state WHERE chat_id = ?').bind(chatId).all();
+  if (results.length === 0) return null;
+  const row = results[0];
+  return {
+    status: row.status,
+    requestData: row.request_data ? JSON.parse(row.request_data) : null,
+    branchName: row.branch_name,
+    startedAt: row.started_at,
+    totalChunks: row.total_chunks,
+    uploadedChunks: row.uploaded_chunks
+  };
+}
+async function dbSetUserState(env, chatId, status, requestData = null, branchName = null, startedAt = null, totalChunks = null, uploadedChunks = null) {
+  const requestDataStr = requestData ? JSON.stringify(requestData) : null;
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO user_state (chat_id, status, request_data, branch_name, started_at, total_chunks, uploaded_chunks)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).bind(chatId, status, requestDataStr, branchName, startedAt, totalChunks, uploadedChunks).run();
+}
+async function dbDeleteUserState(env, chatId) {
+  await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run();
+}
+async function dbGetQueueCount(env) {
+  const { results } = await env.DB.prepare('SELECT COUNT(*) as count FROM queue').all();
+  return results[0].count;
+}
+async function dbGetQueueList(env) {
+  const { results } = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size, need_cleanup FROM queue ORDER BY position').all();
+  return results.map(r => ({
+    position: r.position,
+    chatId: r.chat_id,
+    fileUrl: r.file_url,
+    password: r.zip_password,
+    fileSize: r.file_size,
+    needCleanup: r.need_cleanup === 1
+  }));
+}
+async function dbAddQueue(env, chatId, fileUrl, password, fileSize, needCleanup = false) {
+  const now = Date.now();
+  await env.DB.prepare(`
+    INSERT INTO queue (chat_id, file_url, zip_password, file_size, need_cleanup, enqueued_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(chatId, fileUrl, password, fileSize, needCleanup ? 1 : 0, now).run();
+}
+async function dbPopQueue(env) {
+  // ابتدا اولین ردیف را بگیریم
+  const { results } = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size, need_cleanup FROM queue ORDER BY position LIMIT 1').all();
+  if (results.length === 0) return null;
+  const row = results[0];
+  await env.DB.prepare('DELETE FROM queue WHERE position = ?').bind(row.position).run();
+  return {
+    chatId: row.chat_id,
+    fileUrl: row.file_url,
+    password: row.zip_password,
+    fileSize: row.file_size,
+    needCleanup: row.need_cleanup === 1
+  };
+}
+async function dbRemoveFromQueue(env, chatId) {
+  await env.DB.prepare('DELETE FROM queue WHERE chat_id = ?').bind(chatId).run();
+}
+async function dbGetActiveCount(env) {
+  const { results } = await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').all();
+  return results[0].count;
+}
+async function dbGetActiveBranchesCount(env) {
+  const { results } = await env.DB.prepare('SELECT COUNT(*) as count FROM active_branches').all();
+  return results[0].count;
+}
+async function dbAddActiveBranch(env, branchName, chatId, createdAt) {
+  await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at) VALUES (?, ?, ?)').bind(branchName, chatId, createdAt).run();
+}
+async function dbRemoveActiveBranch(env, branchName) {
+  await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branchName).run();
+}
+async function dbGetLastBranch(env, chatId) {
+  const { results } = await env.DB.prepare('SELECT branch_name FROM active_branches WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1').bind(chatId).all();
+  if (results.length === 0) return null;
+  return results[0].branch_name;
+}
+async function dbSetBranchForUser(env, chatId, branchName) {
+  // ثبت شاخه جدید و حذف شاخه قبلی – اما برای حذف قبلی باید با cron انجام شود. فعلاً فقط ثبت می‌کنیم
+  const now = Date.now();
+  await dbAddActiveBranch(env, branchName, chatId, now);
+  // به‌روزرسانی user_state برای ذکر branch_name فعلی
+  await env.DB.prepare('UPDATE user_state SET branch_name = ? WHERE chat_id = ?').bind(branchName, chatId).run();
+}
+async function dbGetTotalVolume(env) {
+  const { results } = await env.DB.prepare('SELECT total_volume_gb FROM global_stats WHERE id = 1').all();
+  return results[0]?.total_volume_gb || 0;
 }
 
-async function updateStats(env, chatId) {
-  const now = Date.now();
-  const lastCheck = userCheckCache.get(chatId) || 0;
-  if (now - lastCheck < 300000) return;
-  userCheckCache.set(chatId, now);
-  try {
-    let totalUsers = (await env.QUEUE.get('totalUsers', 'json').catch(() => 0)) || 0;
-    let userRecord = await env.QUEUE.get(`user_${chatId}`).catch(() => null);
-    if (!userRecord) {
-      totalUsers++;
-      await env.QUEUE.put(`user_${chatId}`, '1').catch(() => {});
-      await env.QUEUE.put('totalUsers', totalUsers).catch(() => {});
-      statsCache.expires = 0;
-    }
-  } catch (err) { console.error('updateStats error:', err); }
-}
-
+// ========== بقیه توابع ==========
 async function getFileSize(url) {
   try {
     const head = await fetch(url, { method: 'HEAD' });
@@ -138,12 +206,13 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
-    // --- API endpoints ---
+    // --- API endpoints (بدون تغییر زیاد، فقط جایگزینی KV با D1) ---
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        await env.QUEUE.put(`started:${chatId}`, Date.now().toString(), { expirationTtl: 3600 }).catch(() => {});
+        // به‌روزرسانی شروع پردازش در user_state
+        await env.DB.prepare('UPDATE user_state SET started_at = ? WHERE chat_id = ?').bind(Date.now(), chatId).run();
         await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد...", TOKEN);
       }
       return new Response('OK');
@@ -152,8 +221,8 @@ export default {
       const { user_id, total_chunks, uploaded_chunks } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        if (total_chunks) await env.QUEUE.put(`total_chunks:${chatId}`, total_chunks, { expirationTtl: 7200 }).catch(() => {});
-        if (uploaded_chunks !== undefined) await env.QUEUE.put(`uploaded_chunks:${chatId}`, uploaded_chunks, { expirationTtl: 7200 }).catch(() => {});
+        if (total_chunks) await env.DB.prepare('UPDATE user_state SET total_chunks = ? WHERE chat_id = ?').bind(total_chunks, chatId).run();
+        if (uploaded_chunks !== undefined) await env.DB.prepare('UPDATE user_state SET uploaded_chunks = ? WHERE chat_id = ?').bind(uploaded_chunks, chatId).run();
       }
       return new Response('OK');
     }
@@ -161,24 +230,24 @@ export default {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
         const chatId = user_id.split('_')[0];
-        await env.QUEUE.put(`branch:${chatId}`, branch, { expirationTtl: 10800 }).catch(() => {});
-        await env.QUEUE.put(`status:${chatId}`, 'done', { expirationTtl: 10800 }).catch(() => {});
-        await env.QUEUE.put(`last_branch:${chatId}`, branch).catch(() => {});
-        let total = (await env.QUEUE.get('totalBranches', 'json').catch(() => 0)) || 0;
-        await env.QUEUE.put('totalBranches', total + 1).catch(() => {});
-        const requestData = await env.QUEUE.get(`request:${chatId}`, 'json').catch(() => null);
-        const password = requestData?.password || '';
-        const fileSizeBytes = requestData?.fileSize || 0;
-        if (fileSizeBytes > 0) {
-          let currentVol = (await env.QUEUE.get('totalVolume', 'json').catch(() => 0)) || 0;
-          await env.QUEUE.put('totalVolume', currentVol + (fileSizeBytes / (1024 * 1024 * 1024))).catch(() => {});
+        // به‌روزرسانی وضعیت کاربر به done و ذخیره branch
+        await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
+        await dbSetBranchForUser(env, chatId, branch);
+        // افزایش آمار کلی
+        const requestDataRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
+        let fileSizeBytes = 0;
+        if (requestDataRow && requestDataRow.request_data) {
+          const req = JSON.parse(requestDataRow.request_data);
+          fileSizeBytes = req.fileSize || 0;
         }
+        const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
+        await dbIncrementLinks(env, volumeGB);
         statsCache.expires = 0;
+        const password = requestDataRow ? (JSON.parse(requestDataRow.request_data)?.password || '') : '';
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید تا دیگران هم بتوانند از سرویس استفاده کنند.`, TOKEN);
-        await env.QUEUE.delete(`request:${chatId}`).catch(() => {});
-        await env.QUEUE.delete(`started:${chatId}`).catch(() => {});
+        await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run(); // پاک کردن user_state
         await this.finishTask(env);
       }
       return new Response('OK');
@@ -187,9 +256,7 @@ export default {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        await env.QUEUE.delete(`status:${chatId}`).catch(() => {});
-        await env.QUEUE.delete(`request:${chatId}`).catch(() => {});
-        await env.QUEUE.delete(`started:${chatId}`).catch(() => {});
+        await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run();
         await this.finishTask(env);
         await sendSimple(chatId, "❌ پردازش فایل شما با خطا مواجه شد. لطفاً دوباره تلاش کنید.", TOKEN);
       }
@@ -199,29 +266,37 @@ export default {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        await Promise.allSettled([
-          env.QUEUE.delete(`branch:${chatId}`),
-          env.QUEUE.delete(`last_branch:${chatId}`),
-          env.QUEUE.delete(`status:${chatId}`),
-          env.QUEUE.delete(`started:${chatId}`),
-          env.QUEUE.delete(`request:${chatId}`)
-        ]);
+        await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run();
+        await env.DB.prepare('DELETE FROM queue WHERE chat_id = ?').bind(chatId).run();
       }
       return new Response('OK');
     }
 
+    // ========== Webhook اصلی تلگرام ==========
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
-        try {
-          if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
-          if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
-        } catch(e) { console.error(e); }
 
-        // دکمه‌ها
+        // به روز رسانی آمار کاربران (اولین بار)
+        if (update.message?.chat?.id) {
+          const exists = await dbGetUser(env, update.message.chat.id.toString());
+          if (!exists) {
+            const total = await dbAddUser(env, update.message.chat.id.toString());
+            statsCache.expires = 0;
+          }
+        }
+        if (update.callback_query?.message?.chat?.id) {
+          const exists = await dbGetUser(env, update.callback_query.message.chat.id.toString());
+          if (!exists) {
+            await dbAddUser(env, update.callback_query.message.chat.id.toString());
+            statsCache.expires = 0;
+          }
+        }
+
+        // ===== دکمه‌ها =====
         if (update.callback_query) {
           const cb = update.callback_query;
-          const chatId = cb.message.chat.id;
+          const chatId = cb.message.chat.id.toString();
           const data = cb.data;
           await answerCallback(cb.id, TOKEN);
 
@@ -248,12 +323,17 @@ export default {
             await sendSimple(chatId, helpText, TOKEN);
           }
           else if (data === 'stats') {
+            await sendSimple(chatId, "📊 در حال آماده سازی آمار...", TOKEN);
             (async () => {
               try {
-                const stats = await getStats(env);
+                const stats = await dbGetGlobalStats(env);
+                const activeCount = await dbGetActiveCount(env);
+                const queueCount = await dbGetQueueCount(env);
+                const totalBranches = await dbGetActiveBranchesCount(env);
+                const totalUsers = (await env.DB.prepare('SELECT COUNT(*) as count FROM users').first()).count;
                 const repoSize = await getRepoSize(env);
                 const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
-                await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}\n\n📢 @maramivpn`, TOKEN);
+                await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل فایل‌های دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}\n\n📢 @maramivpn`, TOKEN);
               } catch (err) {
                 console.error('Stats error:', err);
                 await sendSimple(chatId, "⚠️ در حال حاضر امکان دریافت آمار وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
@@ -261,26 +341,28 @@ export default {
             })().catch(e => console.error(e));
           }
           else if (data === 'status') {
+            await sendSimple(chatId, "📊 در حال آماده سازی وضعیت...", TOKEN);
             (async () => {
               try {
-                const status = await env.QUEUE.get(`status:${chatId}`).catch(() => null);
-                const total = await env.QUEUE.get(`total_chunks:${chatId}`, 'json').catch(() => null);
-                const uploaded = await env.QUEUE.get(`uploaded_chunks:${chatId}`, 'json').catch(() => null);
-                let progress = (total && uploaded) ? `\n📦 پیشرفت آپلود: ${uploaded} از ${total} تکه (${Math.round(uploaded/total*100)}%)` : '';
-                if (status === 'processing') {
+                const state = await dbGetUserState(env, chatId);
+                if (!state) {
+                  await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
+                  return;
+                }
+                let progress = '';
+                if (state.totalChunks && state.uploadedChunks) {
+                  const percent = Math.round(state.uploadedChunks / state.totalChunks * 100);
+                  progress = `\n📦 پیشرفت آپلود: ${state.uploadedChunks} از ${state.totalChunks} تکه (${percent}%)`;
+                }
+                if (state.status === 'processing') {
                   await sendSimple(chatId, `🔄 وضعیت: در حال پردازش...${progress}`, TOKEN);
-                } else if (status === 'waiting') {
-                  let q = await env.QUEUE.get('queueList', 'json').catch(() => []) || [];
-                  let pos = q.findIndex(i => i.chatId === chatId) + 1;
-                  await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos > 0 ? pos : '?'})`, TOKEN);
-                } else if (status === 'done') {
-                  const branch = await env.QUEUE.get(`branch:${chatId}`).catch(() => null);
-                  if (branch) {
-                    const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
-                    await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود:\n${link}\n\n🗑️ پس از دانلود، از دکمه «حذف فایل من» برای پاک کردن آن استفاده کنید.`, TOKEN);
-                  } else {
-                    await sendSimple(chatId, "درخواستی یافت نشد.", TOKEN);
-                  }
+                } else if (state.status === 'waiting') {
+                  // پیدا کردن جایگاه در صف
+                  const queuePos = await env.DB.prepare('SELECT COUNT(*) as pos FROM queue WHERE position <= (SELECT position FROM queue WHERE chat_id = ?)').bind(chatId).first();
+                  const pos = queuePos ? queuePos.pos : '?';
+                  await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos})`, TOKEN);
+                } else if (state.status === 'done') {
+                  await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${state.branchName}.zip\n\n🗑️ پس از دانلود، از دکمه «حذف فایل من» برای پاک کردن آن استفاده کنید.`, TOKEN);
                 } else {
                   await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
                 }
@@ -291,22 +373,20 @@ export default {
             })().catch(e => console.error(e));
           }
           else if (data === 'new_link') {
-            // دکمه لینک جدید: پاکسازی کامل وضعیت و پیام موفقیت
-            await Promise.allSettled([
-              env.QUEUE.delete(`status:${chatId}`),
-              env.QUEUE.delete(`request:${chatId}`),
-              env.QUEUE.delete(`state:${chatId}`),
-              env.QUEUE.delete(`started:${chatId}`),
-              env.QUEUE.delete(`cleanup_needed:${chatId}`),
-              env.QUEUE.delete(`total_chunks:${chatId}`),
-              env.QUEUE.delete(`uploaded_chunks:${chatId}`)
-            ]);
+            // پاک کردن وضعیت قبلی کاربر
+            await dbDeleteUserState(env, chatId);
+            await dbRemoveFromQueue(env, chatId);
             await sendSimple(chatId, "✅ درخواست قبلی شما لغو شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
           else if (data === 'delete_my_file') {
-            const lastBranch = await env.QUEUE.get(`last_branch:${chatId}`).catch(() => null);
-            if (lastBranch) {
+            await sendSimple(chatId, "🗑️ در حال آماده سازی حذف فایل...", TOKEN);
+            (async () => {
               try {
+                const lastBranch = await dbGetLastBranch(env, chatId);
+                if (!lastBranch) {
+                  await sendSimple(chatId, "❌ هیچ فایل فعالی برای حذف یافت نشد.", TOKEN);
+                  return;
+                }
                 const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${lastBranch}`, {
                   method: 'DELETE',
                   headers: {
@@ -316,7 +396,7 @@ export default {
                   }
                 });
                 if (res.ok) {
-                  await env.QUEUE.delete(`last_branch:${chatId}`).catch(() => {});
+                  await dbRemoveActiveBranch(env, lastBranch);
                   await sendSimple(chatId, "✅ فایل شما از سرور حذف شد. با تشکر از همکاری شما برای مدیریت حجم مخزن.", TOKEN);
                 } else {
                   await sendSimple(chatId, "❌ فایل قبلاً حذف شده یا یافت نشد.", TOKEN);
@@ -325,21 +405,11 @@ export default {
                 console.error(err);
                 await sendSimple(chatId, "⚠️ امکان حذف فایل وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
               }
-            } else {
-              await sendSimple(chatId, "❌ هیچ فایل فعالی برای حذف یافت نشد.", TOKEN);
-            }
+            })().catch(e => console.error(e));
           }
           else if (data === 'cancel' || data === 'cancel_input') {
-            await Promise.allSettled([
-              env.QUEUE.delete(`status:${chatId}`),
-              env.QUEUE.delete(`request:${chatId}`),
-              env.QUEUE.delete(`state:${chatId}`),
-              env.QUEUE.delete(`started:${chatId}`),
-              env.QUEUE.delete(`cleanup_needed:${chatId}`)
-            ]);
-            let q = await env.QUEUE.get('queueList', 'json').catch(() => []) || [];
-            let newQ = q.filter(i => i.chatId !== chatId);
-            await env.QUEUE.put('queueList', JSON.stringify(newQ)).catch(() => {});
+            await dbDeleteUserState(env, chatId);
+            await dbRemoveFromQueue(env, chatId);
             await sendSimple(chatId, "❌ عملیات لغو شد.", TOKEN);
           }
           return new Response('OK');
@@ -347,13 +417,15 @@ export default {
 
         // ========== پیام متنی ==========
         if (update.message?.text) {
-          const chatId = update.message.chat.id;
+          const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
-              await env.QUEUE.put('activeCount', 0).catch(() => {});
-              await env.QUEUE.put('queueList', JSON.stringify([])).catch(() => {});
+              // ریست کردن آمار (تنظیم مجدد activeCount, queue)
+              await env.DB.prepare('DELETE FROM queue').run();
+              await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
+              await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'waiting').run();
               statsCache.expires = 0;
               await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد.", TOKEN);
             } else {
@@ -362,12 +434,8 @@ export default {
             return new Response('OK');
           }
           if (text === '/start') {
-            await Promise.allSettled([
-              env.QUEUE.delete(`status:${chatId}`),
-              env.QUEUE.delete(`state:${chatId}`),
-              env.QUEUE.delete(`started:${chatId}`),
-              env.QUEUE.delete(`cleanup_needed:${chatId}`)
-            ]);
+            await dbDeleteUserState(env, chatId);
+            await dbRemoveFromQueue(env, chatId);
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
@@ -382,20 +450,13 @@ export default {
             return new Response('OK');
           }
 
-          // ========== دریافت لینک جدید (بدون چک کردن وضعیت قبلی) ==========
+          // دریافت لینک جدید
           if (text.match(/^https?:\/\//)) {
-            // پاکسازی کامل وضعیت قبلی (حتی اگر در حال پردازش باشد)
-            await Promise.allSettled([
-              env.QUEUE.delete(`status:${chatId}`),
-              env.QUEUE.delete(`request:${chatId}`),
-              env.QUEUE.delete(`state:${chatId}`),
-              env.QUEUE.delete(`started:${chatId}`),
-              env.QUEUE.delete(`cleanup_needed:${chatId}`),
-              env.QUEUE.delete(`total_chunks:${chatId}`),
-              env.QUEUE.delete(`uploaded_chunks:${chatId}`)
-            ]);
-            // حذف شاخه قبلی از گیت‌هاب (اگر وجود داشته باشد)
-            const lastBranch = await env.QUEUE.get(`last_branch:${chatId}`).catch(() => null);
+            // پاکسازی وضعیت قبلی کاربر
+            await dbDeleteUserState(env, chatId);
+            await dbRemoveFromQueue(env, chatId);
+            // حذف شاخه قبلی گیت‌هاب
+            const lastBranch = await dbGetLastBranch(env, chatId);
             if (lastBranch) {
               try {
                 await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${lastBranch}`, {
@@ -406,11 +467,9 @@ export default {
                     'User-Agent': 'CloudflareWorkerBot/1.0'
                   }
                 });
-                await env.QUEUE.delete(`last_branch:${chatId}`).catch(() => {});
+                await dbRemoveActiveBranch(env, lastBranch);
               } catch(e) { console.error(e); }
             }
-
-            // بررسی حجم مخزن
             const repoSize = await getRepoSize(env);
             if (repoSize >= REPO_SIZE_LIMIT_GB) {
               await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده است. لطفاً چند ساعت بعد تلاش کنید.`, TOKEN);
@@ -418,62 +477,46 @@ export default {
             } else if (repoSize >= REPO_SIZE_WARNING_GB) {
               await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). پس از دانلود، فایل خود را حذف کنید.`, TOKEN);
             }
-
-            // بررسی حجم فایل
             const fileSize = await getFileSize(text);
             if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
               await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
               return new Response('OK');
             }
-
-            // ذخیره لینک در state برای مرحله رمز عبور
-            await env.QUEUE.put(`state:${chatId}`, JSON.stringify({
-              step: 'awaiting_password',
-              url: text,
-              fileSize: fileSize || 0
-            }), { expirationTtl: 3600 }).catch(() => {});
+            // ذخیره state برای مرحله رمز عبور
+            await dbSetUserState(env, chatId, 'awaiting_password', { url: text, fileSize: fileSize || 0 });
             const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
             await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
             return new Response('OK');
           }
 
-          // ========== بقیه پیام‌های متنی (مثلاً رمز عبور) ==========
-          const userStateRaw = await env.QUEUE.get(`state:${chatId}`).catch(() => null);
-          if (userStateRaw) {
-            const userState = JSON.parse(userStateRaw);
-            if (userState.step === 'awaiting_password') {
-              const password = text;
-              const fileUrl = userState.url;
-              const fileSize = userState.fileSize || 0;
-              await env.QUEUE.delete(`state:${chatId}`).catch(() => {});
-              await env.QUEUE.put(`request:${chatId}`, JSON.stringify({
-                url: fileUrl,
-                password: password,
-                fileSize: fileSize
-              }), { expirationTtl: 7200 }).catch(() => {});
-
-              let activeCount = (await env.QUEUE.get('activeCount', 'json').catch(() => 0)) || 0;
-              let queueList = (await env.QUEUE.get('queueList', 'json').catch(() => [])) || [];
-              if (!Array.isArray(queueList)) queueList = [];
-
-              if (activeCount < MAX_CONCURRENT) {
-                await env.QUEUE.put('activeCount', activeCount + 1).catch(() => {});
-                await env.QUEUE.put(`status:${chatId}`, 'processing', { expirationTtl: 7200 }).catch(() => {});
-                this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
-                await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
-              } else {
-                queueList.push({ chatId, fileUrl, password, fileSize });
-                await env.QUEUE.put('queueList', JSON.stringify(queueList)).catch(() => {});
-                await env.QUEUE.put(`status:${chatId}`, 'waiting', { expirationTtl: 7200 }).catch(() => {});
-                await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueList.length}`, TOKEN);
-              }
-              return new Response('OK');
+          // مرحله رمز عبور
+          const state = await dbGetUserState(env, chatId);
+          if (state && state.status === 'awaiting_password') {
+            const password = text;
+            const fileUrl = state.requestData.url;
+            const fileSize = state.requestData.fileSize || 0;
+            // حذف state موقت
+            await dbDeleteUserState(env, chatId);
+            // اضافه کردن به صف یا اجرای مستقیم
+            let activeCount = await dbGetActiveCount(env);
+            let queueCount = await dbGetQueueCount(env);
+            if (activeCount < MAX_CONCURRENT) {
+              // شروع مستقیم
+              await dbSetUserState(env, chatId, 'processing', { url: fileUrl, password: password, fileSize: fileSize });
+              await this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
+              await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
+            } else {
+              // اضافه به صف
+              await dbAddQueue(env, chatId, fileUrl, password, fileSize);
+              await dbSetUserState(env, chatId, 'waiting', { url: fileUrl, password: password, fileSize: fileSize });
+              await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueCount + 1}`, TOKEN);
             }
-          } else {
-            // اگر نه لینک بود و نه مرحله رمز، پیام نامعتبر
-            await sendSimple(chatId, "❌ لینک معتبر نیست (با http:// یا https:// شروع شود).", TOKEN);
             return new Response('OK');
           }
+
+          // اگر هیچکدام نبود
+          await sendSimple(chatId, "❌ لینک معتبر نیست (با http:// یا https:// شروع شود).", TOKEN);
+          return new Response('OK');
         }
         return new Response('OK');
       } catch (err) {
@@ -508,7 +551,8 @@ export default {
     let started = false;
     for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
-      if (await env.QUEUE.get(`started:${chatId}`).catch(() => null)) { started = true; break; }
+      const state = await dbGetUserState(env, chatId);
+      if (state && state.startedAt) { started = true; break; }
     }
     if (!started) {
       await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
@@ -516,8 +560,8 @@ export default {
     let branch = null;
     for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
       await new Promise(r => setTimeout(r, WAIT_INTERVAL));
-      branch = await env.QUEUE.get(`branch:${chatId}`).catch(() => null);
-      if (branch) break;
+      const state = await dbGetUserState(env, chatId);
+      if (state && state.branchName) { branch = state.branchName; break; }
     }
     if (!branch) {
       console.error(`Timeout waiting for branch for ${chatId}`);
@@ -552,17 +596,13 @@ export default {
   },
 
   async finishTask(env) {
-    let activeCount = (await env.QUEUE.get('activeCount', 'json').catch(() => 0)) || 0;
-    if (activeCount > 0) activeCount--;
-    await env.QUEUE.put('activeCount', activeCount).catch(() => {});
-    statsCache.expires = 0;
-    let queueList = (await env.QUEUE.get('queueList', 'json').catch(() => [])) || [];
-    if (queueList.length > 0) {
-      const next = queueList.shift();
-      await env.QUEUE.put('queueList', JSON.stringify(queueList)).catch(() => {});
-      await env.QUEUE.put('activeCount', activeCount + 1).catch(() => {});
-      await env.QUEUE.put(`status:${next.chatId}`, 'processing', { expirationTtl: 7200 }).catch(() => {});
-      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
+    // گرفتن اولین آیتم از صف و شروع آن
+    const next = await dbPopQueue(env);
+    if (next) {
+      await dbSetUserState(env, next.chatId, 'processing', { url: next.fileUrl, password: next.password, fileSize: next.fileSize });
+      await this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
+      // ارسال پیام به کاربر که از صف خارج شده
+      await sendSimple(next.chatId, "🔄 نوبت شما رسید! در حال شروع پردازش فایل...", env.TELEGRAM_TOKEN);
     }
   }
 };
