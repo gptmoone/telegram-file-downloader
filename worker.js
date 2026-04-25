@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با آمار حجم کل دانلودها و ریست فقط پردازش‌ها
+// ربات دانلودر نهایی - با آمار تجمعی لینک‌های ملی و عدم کاهش آن
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -133,8 +133,10 @@ async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_
       }
     });
     if (res.ok) {
-      let total = await env.QUEUE.get('totalBranches', 'json') || 0;
-      if (total > 0) await env.QUEUE.put('totalBranches', total - 1);
+      // حذف خط کاهش totalBranches: تعداد کل لینک‌های ملی نباید کاهش یابد
+      // let total = await env.QUEUE.get('totalBranches', 'json') || 0;
+      // if (total > 0) await env.QUEUE.put('totalBranches', total - 1);
+      
       statsCache.expires = 0;
       await env.QUEUE.delete(`last_branch:${chatId}`);
       return true;
@@ -180,10 +182,12 @@ export default {
         await env.QUEUE.put(`branch:${chatId}`, branch, { expirationTtl: 10800 });
         await env.QUEUE.put(`status:${chatId}`, 'done');
         await env.QUEUE.put(`last_branch:${chatId}`, branch);
+        
+        // افزایش تعداد کل لینک‌های ملی ساخته شده (فقط موفقیت)
         let total = await env.QUEUE.get('totalBranches', 'json') || 0;
         await env.QUEUE.put('totalBranches', total + 1);
         
-        // اضافه کردن حجم فایل به حجم کل (totalVolume)
+        // اضافه کردن حجم فایل به حجم کل دانلود شده
         const requestData = await env.QUEUE.get(`request:${chatId}`, 'json');
         const password = requestData?.password || '';
         const fileSizeBytes = requestData?.fileSize || 0;
@@ -285,7 +289,7 @@ export default {
             let warningMsg = '';
             if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن به حد مجاز رسیده است. لطفاً فایل‌های خود را حذف کنید تا امکان استفاده برای دیگران باقی بماند.</b>';
             else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
-            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 لینک‌های ملی تولید شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
+            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
           }
           else if (data === 'status') {
             const status = await env.QUEUE.get(`status:${chatId}`);
@@ -347,11 +351,11 @@ export default {
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
-              // فقط activeCount و queueList را ریست کن، totalBranches و totalVolume را دست نزن
+              // فقط activeCount و queueList را ریست می‌کنیم (تعداد لینک‌های ملی و حجم کل دست نخورده باقی می‌ماند)
               await env.QUEUE.put('activeCount', 0);
               await env.QUEUE.put('queueList', JSON.stringify([]));
               statsCache.expires = 0;
-              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد. تعداد لینک‌های ملی و حجم کل دست نخورده باقی ماندند.", TOKEN);
+              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد. تعداد کل لینک‌های ملی و حجم کل دست نخورده باقی ماندند.", TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN);
             }
@@ -399,7 +403,6 @@ export default {
                 await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
                 return new Response('OK');
               }
-              // ذخیره حجم فایل در state برای استفاده در /api/complete
               await env.QUEUE.put(`state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text, fileSize: fileSize || 0 }), { expirationTtl: 3600 });
               const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
               await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
