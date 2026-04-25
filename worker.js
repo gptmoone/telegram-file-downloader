@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با بررسی حجم مخزن و حذف دستی فایل
+// ربات دانلودر نهایی - با تایم‌اوت ۲ ساعته برای فایل‌های حجیم
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -15,9 +15,9 @@ const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
 const START_WAIT_INTERVAL = 15000;
 const MAX_START_WAIT_ATTEMPTS = 3;
-const TASK_TIMEOUT = 15 * 60 * 1000;
-const REPO_SIZE_LIMIT_GB = 80;     // حداکثر حجم مجاز مخزن (گیگابایت)
-const REPO_SIZE_WARNING_GB = 75;   // آستانه هشدار (گیگابایت)
+const TASK_TIMEOUT = 120 * 60 * 1000;    // 120 دقیقه (کافی برای فایل‌های ۲ گیگابایتی)
+const REPO_SIZE_LIMIT_GB = 80;
+const REPO_SIZE_WARNING_GB = 75;
 
 let statsCache = { data: null, expires: 0 };
 let userCheckCache = new Map();
@@ -51,7 +51,6 @@ async function answerCallback(callbackId, TOKEN) {
   });
 }
 
-// ----- بررسی حجم مخزن از GitHub API -----
 async function getRepoSize(env) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
@@ -66,9 +65,7 @@ async function getRepoSize(env) {
     });
     if (res.ok) {
       const data = await res.json();
-      // size در پاسخ بر حسب کیلوبایت است
-      const sizeKB = data.size;
-      const sizeGB = sizeKB / (1024 * 1024);
+      const sizeGB = data.size / (1024 * 1024);
       return sizeGB;
     }
   } catch (e) { console.error('getRepoSize error:', e); }
@@ -289,7 +286,6 @@ export default {
             }
           }
           else if (data === 'delete_my_file') {
-            // حذف فایل کاربر
             const branchDeleted = await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
             if (branchDeleted) {
               await Promise.all([
@@ -366,14 +362,12 @@ export default {
           const userStateRaw = await env.QUEUE.get(`state:${chatId}`);
           if (!userStateRaw) {
             if (text.match(/^https?:\/\//)) {
-              // قبل از پذیرش لینک جدید، حجم مخزن را بررسی کن
               const repoSize = await getRepoSize(env);
               if (repoSize >= REPO_SIZE_LIMIT_GB) {
                 await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده است. لطفاً چند ساعت بعد تلاش کنید یا از دیگر کاربران بخواهید فایل‌های خود را حذف کنند.\n\n📊 حجم فعلی: ${repoSize.toFixed(1)} گیگابایت`, TOKEN);
                 return new Response('OK');
               } else if (repoSize >= REPO_SIZE_WARNING_GB) {
                 await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). لطفاً پس از دانلود فایل خود، آن را حذف کنید تا دیگران هم بتوانند استفاده کنند.`, TOKEN);
-                // ادامه پردازش عادی
               }
               const fileSize = await getFileSize(text);
               if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
@@ -403,7 +397,7 @@ export default {
               await env.QUEUE.put('activeCount', activeCount + 1);
               await env.QUEUE.put(`status:${chatId}`, 'processing');
               this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
-              await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...", TOKEN);
+              await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
             } else {
               queueList.push({ chatId, fileUrl, password });
               await env.QUEUE.put('queueList', JSON.stringify(queueList));
@@ -445,6 +439,7 @@ export default {
       return;
     }
 
+    // منتظر شروع پردازش (حداکثر 45 ثانیه)
     let started = false;
     for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
@@ -454,15 +449,16 @@ export default {
       await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
     }
 
+    // منتظر اتمام پردازش (حداکثر 120 دقیقه)
     let branch = null;
     const deadline = Date.now() + TASK_TIMEOUT;
     while (Date.now() < deadline && !branch) {
-      await new Promise(r => setTimeout(r, 30000));
+      await new Promise(r => setTimeout(r, 30000)); // هر 30 ثانیه چک کن
       branch = await env.QUEUE.get(`branch:${chatId}`);
     }
     if (!branch) {
-      console.error(`Timeout waiting for branch for ${chatId}`);
-      await sendSimple(chatId, "❌ زمان انتظار برای پردازش فایل به پایان رسید. لطفاً دوباره تلاش کنید.", TOKEN);
+      console.error(`Timeout waiting for branch for ${chatId} after ${TASK_TIMEOUT/60000} minutes`);
+      await sendSimple(chatId, `❌ زمان انتظار برای پردازش فایل (${TASK_TIMEOUT/60000} دقیقه) به پایان رسید. شاید فایل خیلی حجیم است یا مشکلی در گیت‌هاب وجود دارد. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
       await this.finishTask(env);
     }
   },
