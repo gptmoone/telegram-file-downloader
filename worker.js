@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با هشدار امنیتی و راهنمای کامل
+// ربات دانلودر نهایی - بهینه‌شده برای کاهش مصرف KV
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -10,8 +10,14 @@ const MAIN_KEYBOARD = {
   ]
 };
 const MAX_CONCURRENT = 10;
-const MAX_RETRIES = 3;
-const RETRY_INTERVAL = 30000; // 30 ثانیه
+const MAX_RETRIES = 2;                     // کمتر از ۳
+const RETRY_INTERVAL = 30000;              // ۳۰ ثانیه
+const WAIT_INTERVAL = 30000;               // ۳۰ ثانیه (به جای ۱۰)
+const MAX_WAIT_CYCLES = 30;                // حداکثر ۱۵ دقیقه (۳۰ * ۳۰ ثانیه)
+const START_WAIT_INTERVAL = 15000;         // ۱۵ ثانیه
+const MAX_START_WAIT_ATTEMPTS = 4;         // حداکثر ۱ دقیقه
+
+let statsCache = { data: null, expires: 0 };
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -43,6 +49,9 @@ async function answerCallback(callbackId, TOKEN) {
 }
 
 async function getStats(env) {
+  const now = Date.now();
+  if (statsCache.data && statsCache.expires > now) return statsCache.data;
+  
   let totalUsers = await env.QUEUE.get('totalUsers', 'json') || 0;
   let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
   let queueList = await env.QUEUE.get('queueList', 'json') || [];
@@ -52,7 +61,9 @@ async function getStats(env) {
     activeCount = 0;
     await env.QUEUE.put('activeCount', 0);
   }
-  return { totalUsers, activeCount, waiting: queueList.length, totalBranches };
+  const result = { totalUsers, activeCount, waiting: queueList.length, totalBranches };
+  statsCache = { data: result, expires: now + 10000 }; // کش ۱۰ ثانیه
+  return result;
 }
 
 async function updateStats(env, chatId) {
@@ -62,6 +73,7 @@ async function updateStats(env, chatId) {
     totalUsers++;
     await env.QUEUE.put(`user_${chatId}`, '1');
     await env.QUEUE.put('totalUsers', totalUsers);
+    statsCache.expires = 0; // بی‌اعتبار کردن کش
   }
 }
 
@@ -90,6 +102,7 @@ async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_
       if (res.ok) {
         let total = await env.QUEUE.get('totalBranches', 'json') || 0;
         await env.QUEUE.put('totalBranches', total - 1);
+        statsCache.expires = 0;
       }
       await env.QUEUE.delete(`last_branch:${chatId}`);
     } catch (e) { console.error('Delete branch error:', e); }
@@ -105,7 +118,7 @@ export default {
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
 
-    // ===== اطلاع از شروع پردازش =====
+    // ----- اطلاع از شروع پردازش -----
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -116,7 +129,7 @@ export default {
       return new Response('OK');
     }
 
-    // ===== دریافت پیشرفت =====
+    // ----- دریافت پیشرفت -----
     if (path === '/api/progress' && request.method === 'POST') {
       const { user_id, total_chunks, uploaded_chunks } = await request.json();
       if (user_id) {
@@ -127,7 +140,7 @@ export default {
       return new Response('OK');
     }
 
-    // ===== اتمام کار =====
+    // ----- اتمام کار -----
     if (path === '/api/complete' && request.method === 'POST') {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
@@ -137,6 +150,7 @@ export default {
         await env.QUEUE.put(`last_branch:${chatId}`, branch);
         let total = await env.QUEUE.get('totalBranches', 'json') || 0;
         await env.QUEUE.put('totalBranches', total + 1);
+        statsCache.expires = 0;
         const requestData = await env.QUEUE.get(`request:${chatId}`, 'json');
         const password = requestData?.password || '';
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
@@ -144,13 +158,12 @@ export default {
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.`, TOKEN);
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
-        await env.QUEUE.delete(`retry:${chatId}`);
         await this.finishTask(env);
       }
       return new Response('OK');
     }
 
-    // ===== پاکسازی توسط cron =====
+    // ----- پاکسازی توسط cron -----
     if (path === '/api/cleanup' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -159,12 +172,11 @@ export default {
         await env.QUEUE.delete(`last_branch:${chatId}`);
         await env.QUEUE.delete(`status:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
-        await env.QUEUE.delete(`retry:${chatId}`);
       }
       return new Response('OK');
     }
 
-    // ===== وب‌هوک اصلی تلگرام =====
+    // ----- وب‌هوک اصلی تلگرام -----
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
@@ -186,7 +198,6 @@ export default {
             await env.QUEUE.delete(`total_chunks:${chatId}`);
             await env.QUEUE.delete(`uploaded_chunks:${chatId}`);
             await env.QUEUE.delete(`started:${chatId}`);
-            await env.QUEUE.delete(`retry:${chatId}`);
             await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
             await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
@@ -244,7 +255,6 @@ export default {
             await env.QUEUE.delete(`request:${chatId}`);
             await env.QUEUE.delete(`state:${chatId}`);
             await env.QUEUE.delete(`started:${chatId}`);
-            await env.QUEUE.delete(`retry:${chatId}`);
             let q = await env.QUEUE.get('queueList', 'json') || [];
             await env.QUEUE.put('queueList', JSON.stringify(q.filter(i => i.chatId !== chatId)));
             await sendSimple(chatId, "❌ عملیات لغو شد.", TOKEN);
@@ -265,6 +275,7 @@ export default {
               await env.QUEUE.put('activeCount', 0);
               await env.QUEUE.put('queueList', JSON.stringify([]));
               await env.QUEUE.put('totalBranches', 0);
+              statsCache.expires = 0;
               await sendSimple(chatId, "✅ آمار ربات بازنشانی شد.\n`activeCount` = 0، صف خالی شد.", TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN);
@@ -276,7 +287,6 @@ export default {
             await env.QUEUE.delete(`status:${chatId}`);
             await env.QUEUE.delete(`state:${chatId}`);
             await env.QUEUE.delete(`started:${chatId}`);
-            await env.QUEUE.delete(`retry:${chatId}`);
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
@@ -364,7 +374,7 @@ export default {
         }
       }
 
-      const started = await this.waitForStart(chatId, env, RETRY_INTERVAL);
+      const started = await this.waitForStart(chatId, env);
       if (started) {
         success = true;
         break;
@@ -378,6 +388,19 @@ export default {
           return;
         }
       }
+    }
+
+    // منتظر ماندن برای ایجاد branch (با polling بهینه)
+    let branch = null;
+    for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
+      await new Promise(r => setTimeout(r, WAIT_INTERVAL));
+      branch = await env.QUEUE.get(`branch:${chatId}`);
+      if (branch) break;
+    }
+    if (!branch) {
+      console.error(`Timeout waiting for branch for chat ${chatId}`);
+      await sendSimple(chatId, "❌ زمان انتظار برای پردازش فایل به پایان رسید. لطفاً دوباره تلاش کنید.", TOKEN);
+      await this.finishTask(env);
     }
   },
 
@@ -411,14 +434,13 @@ export default {
     }
   },
 
-  async waitForStart(chatId, env, timeoutMs) {
+  async waitForStart(chatId, env) {
     const startKey = `started:${chatId}`;
     await env.QUEUE.delete(startKey);
-    const startTime = Date.now();
-    while (Date.now() - startTime < timeoutMs) {
+    for (let attempt = 0; attempt < MAX_START_WAIT_ATTEMPTS; attempt++) {
+      await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
       const started = await env.QUEUE.get(startKey);
       if (started) return true;
-      await new Promise(r => setTimeout(r, 5000));
     }
     return false;
   },
