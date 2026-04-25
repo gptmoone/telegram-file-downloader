@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - حذف کامل وابستگی KV از دکمه «لینک جدید»
+// ربات دانلودر نهایی - بدون delete KV، واگذاری حذف به GitHub Actions
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -24,7 +24,7 @@ const REPO_SIZE_WARNING_GB = 75;
 let statsCache = { data: null, expires: 0 };
 let userCheckCache = new Map();
 
-// === توابع کمکی با timeout (فقط برای بخش‌های ضروری) ===
+// توابع کمکی با timeout (فقط برای get/put، بدون delete)
 async function withTimeout(promise, ms, fallback = null) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -46,11 +46,11 @@ function safeKVGet(env, key, fallback = null) {
 function safeKVPut(env, key, value, options = {}) {
   return withTimeout(env.QUEUE.put(key, value, options), 1500, null);
 }
+// تابع delete فقط در موارد ضروری و محدود (مثلاً پاکسازی نهایی) استفاده می‌شود
 function safeKVDelete(env, key) {
   return withTimeout(env.QUEUE.delete(key), 1500, null);
 }
 
-// ===== توابع اصلی =====
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
   const body = {
@@ -155,6 +155,7 @@ async function getFileSize(url) {
   } catch { return null; }
 }
 
+// حذف شاخه از گیت‌هاب (توسط Worker انجام نمی‌شود، فقط از طریق API)
 async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO) {
   const branchName = await safeKVGet(env, `last_branch:${chatId}`);
   if (!branchName) return false;
@@ -186,7 +187,7 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
-    // API endpoints (بدون تغییر)
+    // API endpoints (بدون تغییر عمده)
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -271,7 +272,6 @@ export default {
           const chatId = cb.message.chat.id;
           const data = cb.data;
 
-          // پاسخ فوری (اجباری)
           await answerCallback(cb.id, TOKEN);
 
           if (data === 'help') {
@@ -340,8 +340,10 @@ export default {
             })().catch(e => console.error(e));
           }
           else if (data === 'new_link') {
-            // ========== دکمه لینک جدید: بدون هیچ عملیات KV ==========
-            await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
+            // ========== دکمه لینک جدید: بدون حذف مستقیم KV ==========
+            // فقط یک پرچم برای پاکسازی بعدی در GitHub Actions ثبت می‌کنیم
+            await safeKVPut(env, `cleanup_needed:${chatId}`, Date.now().toString(), { expirationTtl: 3600 });
+            await sendSimple(chatId, "✅ وضعیت قبلی شما در انتظار پاکسازی است. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
           else if (data === 'delete_my_file') {
             (async () => {
@@ -407,7 +409,7 @@ export default {
               safeKVDelete(env, `status:${chatId}`),
               safeKVDelete(env, `state:${chatId}`),
               safeKVDelete(env, `started:${chatId}`)
-            });
+            ]);
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
@@ -421,11 +423,15 @@ export default {
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
+
+          // بررسی پرچم پاکسازی قبل از دریافت لینک جدید
+          const cleanupNeeded = await safeKVGet(env, `cleanup_needed:${chatId}`);
           let status = await safeKVGet(env, `status:${chatId}`);
           if (status && status !== 'done' && status !== 'cancelled') {
             await sendSimple(chatId, `⚠️ شما یک درخواست فعال دارید (${status === 'waiting' ? 'در صف' : 'در حال پردازش'}). لطفاً صبر کنید یا از دکمه لغو استفاده کنید.`, TOKEN);
             return new Response('OK');
           }
+
           const userStateRaw = await safeKVGet(env, `state:${chatId}`);
           if (!userStateRaw) {
             if (text.match(/^https?:\/\//)) {
@@ -441,7 +447,15 @@ export default {
                 await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
                 return new Response('OK');
               }
-              await safeKVPut(env, `state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text, fileSize: fileSize || 0 }), { expirationTtl: 3600 });
+              // اگر نیاز به پاکسازی وجود دارد، آن را در state ذخیره می‌کنیم
+              await safeKVPut(env, `state:${chatId}`, JSON.stringify({
+                step: 'awaiting_password',
+                url: text,
+                fileSize: fileSize || 0,
+                cleanup: cleanupNeeded ? 'yes' : 'no'
+              }), { expirationTtl: 3600 });
+              // حذف پرچم cleanup تا دوباره استفاده نشود
+              if (cleanupNeeded) await safeKVDelete(env, `cleanup_needed:${chatId}`);
               const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
               await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
             } else {
@@ -449,23 +463,32 @@ export default {
             }
             return new Response('OK');
           }
+
           const userState = JSON.parse(userStateRaw);
           if (userState.step === 'awaiting_password') {
             const password = text;
             const fileUrl = userState.url;
             const fileSize = userState.fileSize || 0;
+            const needCleanup = userState.cleanup === 'yes';
             await safeKVDelete(env, `state:${chatId}`);
-            await safeKVPut(env, `request:${chatId}`, JSON.stringify({ url: fileUrl, password, fileSize }), { expirationTtl: 7200 });
+            // ذخیره درخواست با نشانگر نیاز به پاکسازی
+            await safeKVPut(env, `request:${chatId}`, JSON.stringify({
+              url: fileUrl,
+              password: password,
+              fileSize: fileSize,
+              needCleanup: needCleanup
+            }), { expirationTtl: 7200 });
+
             let activeCount = await safeKVGet(env, 'activeCount', 0);
             let queueList = await safeKVGet(env, 'queueList', []);
             if (!Array.isArray(queueList)) queueList = [];
             if (activeCount < MAX_CONCURRENT) {
               await safeKVPut(env, 'activeCount', activeCount + 1);
               await safeKVPut(env, `status:${chatId}`, 'processing', { expirationTtl: 7200 });
-              this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
+              this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN, needCleanup).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
             } else {
-              queueList.push({ chatId, fileUrl, password, fileSize });
+              queueList.push({ chatId, fileUrl, password, fileSize, needCleanup });
               await safeKVPut(env, 'queueList', JSON.stringify(queueList));
               await safeKVPut(env, `status:${chatId}`, 'waiting', { expirationTtl: 7200 });
               await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueList.length}`, TOKEN);
@@ -482,12 +505,12 @@ export default {
     return new Response('Bot is running');
   },
 
-  async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
+  async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN, needCleanup = false) {
     const userId = `${chatId}_${Date.now()}`;
     let retry = 0;
     let workflowSent = false;
     while (retry <= MAX_RETRIES && !workflowSent) {
-      const sent = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN);
+      const sent = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN, needCleanup);
       if (sent) {
         workflowSent = true;
         break;
@@ -524,11 +547,17 @@ export default {
     }
   },
 
-  async sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN) {
+  async sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN, needCleanup = false) {
     const GITHUB_TOKEN = env.GH_TOKEN;
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
     try {
+      const body = { ref: 'main', inputs: { file_url: fileUrl, zip_password: password, user_id: userId } };
+      if (needCleanup) {
+        // همچنین last_branch کاربر را برای حذف ارسال کنیم
+        const lastBranch = await safeKVGet(env, `last_branch:${chatId}`);
+        if (lastBranch) body.inputs.cleanup_branch = lastBranch;
+      }
       const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
         method: 'POST',
         headers: {
@@ -536,7 +565,7 @@ export default {
           'Accept': 'application/vnd.github.v3+json',
           'User-Agent': 'CloudflareWorkerBot/1.0'
         },
-        body: JSON.stringify({ ref: 'main', inputs: { file_url: fileUrl, zip_password: password, user_id: userId } })
+        body: JSON.stringify(body)
       });
       return res.ok;
     } catch { return false; }
@@ -553,7 +582,7 @@ export default {
       await safeKVPut(env, 'queueList', JSON.stringify(queueList));
       await safeKVPut(env, 'activeCount', activeCount + 1);
       await safeKVPut(env, `status:${next.chatId}`, 'processing', { expirationTtl: 7200 });
-      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
+      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN, next.needCleanup || false).catch(e => console.error(e));
     }
   }
 };
