@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با timeout 2 ثانیه برای KV و مقاوم در برابر محدودیت
+// ربات دانلودر - نسخه نهایی با مقاومت کامل در برابر محدودیت KV
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -10,7 +10,6 @@ const MAIN_KEYBOARD = {
     [{ text: "🚫 لغو درخواست", callback_data: "cancel" }]
   ]
 };
-
 const MAX_CONCURRENT = 10;
 const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
@@ -21,16 +20,16 @@ const WAIT_INTERVAL = 60000;
 const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
-const KV_TIMEOUT_MS = 2000; // 2 ثانیه
+const KV_TIMEOUT_MS = 1000; // 1 ثانیه
 
 let statsCache = { data: null, expires: 0 };
 let userCheckCache = new Map();
 
-// === توابع کمکی با timeout ===
+// === توابع کمکی با timeout کوتاه ===
 async function withTimeout(promise, ms, fallback = null) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error('KV operation timeout')), ms);
+    timeoutId = setTimeout(() => reject(new Error('KV timeout')), ms);
   });
   try {
     const result = await Promise.race([promise, timeoutPromise]);
@@ -38,7 +37,7 @@ async function withTimeout(promise, ms, fallback = null) {
     return result;
   } catch (err) {
     clearTimeout(timeoutId);
-    console.error('KV timeout or error:', err);
+    console.error('KV timeout/error:', err.message);
     return fallback;
   }
 }
@@ -46,11 +45,9 @@ async function withTimeout(promise, ms, fallback = null) {
 async function safeKVGet(env, key, fallback = null) {
   return withTimeout(env.QUEUE.get(key), KV_TIMEOUT_MS, fallback);
 }
-
 async function safeKVPut(env, key, value, options = {}) {
   return withTimeout(env.QUEUE.put(key, value, options), KV_TIMEOUT_MS, null);
 }
-
 async function safeKVDelete(env, key) {
   return withTimeout(env.QUEUE.delete(key), KV_TIMEOUT_MS, null);
 }
@@ -71,18 +68,18 @@ async function sendMessage(chatId, text, keyboard, TOKEN) {
     body: JSON.stringify(body)
   });
 }
-
 async function sendSimple(chatId, text, TOKEN) {
   return sendMessage(chatId, text, MAIN_KEYBOARD, TOKEN);
 }
-
 async function answerCallback(callbackId, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`;
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callback_query_id: callbackId })
-  }).catch(e => console.error('answerCallback error:', e));
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackId })
+    });
+  } catch(e) { console.error('answerCallback failed:', e); }
 }
 
 async function getRepoSize(env) {
@@ -110,17 +107,22 @@ async function getStats(env) {
   if (statsCache.data && statsCache.expires > now) return statsCache.data;
   try {
     const [totalUsers, activeCount, queueListRaw, totalBranches, totalVolume] = await Promise.all([
-      safeKVGet(env, 'totalUsers', 0).then(v => v || 0),
-      safeKVGet(env, 'activeCount', 0).then(v => v || 0),
-      safeKVGet(env, 'queueList', []).then(v => v || []),
-      safeKVGet(env, 'totalBranches', 0).then(v => v || 0),
-      safeKVGet(env, 'totalVolume', 0).then(v => v || 0)
+      safeKVGet(env, 'totalUsers', 0),
+      safeKVGet(env, 'activeCount', 0),
+      safeKVGet(env, 'queueList', []),
+      safeKVGet(env, 'totalBranches', 0),
+      safeKVGet(env, 'totalVolume', 0)
     ]);
     let realActive = activeCount;
     if (realActive > MAX_CONCURRENT || realActive < 0) realActive = 0;
     if (realActive !== activeCount) await safeKVPut(env, 'activeCount', realActive);
-
-    const result = { totalUsers, activeCount: realActive, waiting: queueListRaw.length, totalLinks: totalBranches, totalVolume };
+    const result = {
+      totalUsers: totalUsers || 0,
+      activeCount: realActive,
+      waiting: (queueListRaw || []).length,
+      totalLinks: totalBranches || 0,
+      totalVolume: totalVolume || 0
+    };
     statsCache = { data: result, expires: now + 60000 };
     return result;
   } catch (err) {
@@ -135,7 +137,6 @@ async function updateStats(env, chatId) {
   const lastCheck = userCheckCache.get(chatId) || 0;
   if (now - lastCheck < 300000) return;
   userCheckCache.set(chatId, now);
-
   try {
     let totalUsers = await safeKVGet(env, 'totalUsers', 0);
     let userRecord = await safeKVGet(env, `user_${chatId}`);
@@ -197,7 +198,6 @@ export default {
       }
       return new Response('OK');
     }
-
     if (path === '/api/progress' && request.method === 'POST') {
       const { user_id, total_chunks, uploaded_chunks } = await request.json();
       if (user_id) {
@@ -207,7 +207,6 @@ export default {
       }
       return new Response('OK');
     }
-
     if (path === '/api/complete' && request.method === 'POST') {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
@@ -215,18 +214,15 @@ export default {
         await safeKVPut(env, `branch:${chatId}`, branch, { expirationTtl: 10800 });
         await safeKVPut(env, `status:${chatId}`, 'done', { expirationTtl: 10800 });
         await safeKVPut(env, `last_branch:${chatId}`, branch);
-
         let total = await safeKVGet(env, 'totalBranches', 0);
-        await safeKVPut(env, 'totalBranches', total + 1);
-
+        await safeKVPut(env, 'totalBranches', (total || 0) + 1);
         const requestData = await safeKVGet(env, `request:${chatId}`, null);
         const password = requestData?.password || '';
         const fileSizeBytes = requestData?.fileSize || 0;
         if (fileSizeBytes > 0) {
           let currentVol = await safeKVGet(env, 'totalVolume', 0);
-          await safeKVPut(env, 'totalVolume', currentVol + (fileSizeBytes / (1024 * 1024 * 1024)));
+          await safeKVPut(env, 'totalVolume', (currentVol || 0) + (fileSizeBytes / (1024 * 1024 * 1024)));
         }
-
         statsCache.expires = 0;
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
@@ -237,7 +233,6 @@ export default {
       }
       return new Response('OK');
     }
-
     if (path === '/api/failed' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -250,7 +245,6 @@ export default {
       }
       return new Response('OK');
     }
-
     if (path === '/api/cleanup' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -266,28 +260,23 @@ export default {
       return new Response('OK');
     }
 
-    // --- Webhook اصلی تلگرام ---
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
-
-        // به روز رسانی آمار با زمان کوتاه
         try {
           if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
           if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
         } catch(e) { console.error(e); }
 
-        // ========== دکمه‌ها ==========
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id;
           const data = cb.data;
 
-          // پاسخ فوری به تلگرام - همیشه اجرا می‌شود
-          answerCallback(cb.id, TOKEN);
+          // پاسخ فوری (اجباری)
+          await answerCallback(cb.id, TOKEN);
 
           if (data === 'help') {
-            // راهنما: بدون KV و سریع
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
               `این ربات لینک مستقیم فایل را به لینک قابل دانلود در <b>اینترنت ملی</b> تبدیل می‌کند.\n\n` +
               `🔹 <b>نحوه استفاده:</b>\n` +
@@ -310,7 +299,6 @@ export default {
             await sendSimple(chatId, helpText, TOKEN);
           }
           else if (data === 'stats') {
-            // آمار: با timeout 2 ثانیه
             (async () => {
               try {
                 const stats = await getStats(env);
@@ -354,9 +342,10 @@ export default {
             })().catch(e => console.error(e));
           }
           else if (data === 'new_link') {
-            // ========== دکمه لینک جدید: بدون وابستگی به delete ==========
+            // ========== لینک جدید: بدون منتظر ماندن برای حذف ==========
             (async () => {
-              // عملیات حذف را با timeout و نادیده گرفتن خطا انجام بده
+              await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
+              // پاکسازی پس‌زمینه (بدون wait)
               Promise.allSettled([
                 safeKVDelete(env, `status:${chatId}`),
                 safeKVDelete(env, `request:${chatId}`),
@@ -366,8 +355,6 @@ export default {
                 safeKVDelete(env, `uploaded_chunks:${chatId}`)
               ]).catch(e => console.error(e));
               try { await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO); } catch(e) {}
-              // همیشه پیام موفقیت نمایش بده (حتی اگر حذف نشد)
-              await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
             })().catch(e => console.error(e));
           }
           else if (data === 'delete_my_file') {
@@ -413,11 +400,10 @@ export default {
           return new Response('OK');
         }
 
-        // ========== پیام متنی (بدون تغییر قابل توجه) ==========
+        // ========== پیام متنی ==========
         if (update.message?.text) {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
-
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -430,7 +416,6 @@ export default {
             }
             return new Response('OK');
           }
-
           if (text === '/start') {
             await Promise.allSettled([
               safeKVDelete(env, `status:${chatId}`),
@@ -450,13 +435,11 @@ export default {
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
-
           let status = await safeKVGet(env, `status:${chatId}`);
           if (status && status !== 'done' && status !== 'cancelled') {
             await sendSimple(chatId, `⚠️ شما یک درخواست فعال دارید (${status === 'waiting' ? 'در صف' : 'در حال پردازش'}). لطفاً صبر کنید یا از دکمه لغو استفاده کنید.`, TOKEN);
             return new Response('OK');
           }
-
           const userStateRaw = await safeKVGet(env, `state:${chatId}`);
           if (!userStateRaw) {
             if (text.match(/^https?:\/\//)) {
@@ -480,7 +463,6 @@ export default {
             }
             return new Response('OK');
           }
-
           const userState = JSON.parse(userStateRaw);
           if (userState.step === 'awaiting_password') {
             const password = text;
@@ -488,11 +470,9 @@ export default {
             const fileSize = userState.fileSize || 0;
             await safeKVDelete(env, `state:${chatId}`);
             await safeKVPut(env, `request:${chatId}`, JSON.stringify({ url: fileUrl, password, fileSize }), { expirationTtl: 7200 });
-
             let activeCount = await safeKVGet(env, 'activeCount', 0);
             let queueList = await safeKVGet(env, 'queueList', []);
             if (!Array.isArray(queueList)) queueList = [];
-
             if (activeCount < MAX_CONCURRENT) {
               await safeKVPut(env, 'activeCount', activeCount + 1);
               await safeKVPut(env, `status:${chatId}`, 'processing', { expirationTtl: 7200 });
@@ -520,7 +500,6 @@ export default {
     const userId = `${chatId}_${Date.now()}`;
     let retry = 0;
     let workflowSent = false;
-
     while (retry <= MAX_RETRIES && !workflowSent) {
       const sent = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN);
       if (sent) {
@@ -538,7 +517,6 @@ export default {
       await this.finishTask(env);
       return;
     }
-
     let started = false;
     for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
@@ -547,7 +525,6 @@ export default {
     if (!started) {
       await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
     }
-
     let branch = null;
     for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
       await new Promise(r => setTimeout(r, WAIT_INTERVAL));
@@ -584,7 +561,6 @@ export default {
     if (activeCount > 0) activeCount--;
     await safeKVPut(env, 'activeCount', activeCount);
     statsCache.expires = 0;
-
     let queueList = await safeKVGet(env, 'queueList', []);
     if (queueList && queueList.length > 0) {
       const next = queueList.shift();
