@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - بهینه برای کاهش عملیات Delete KV
+// ربات دانلودر نهایی - رفع مشکل استارت
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -133,7 +133,6 @@ async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_
       }
     });
     if (res.ok) {
-      // فقط last_branch را حذف می‌کنیم، totalBranches را کاهش نمی‌دهیم
       await env.QUEUE.delete(`last_branch:${chatId}`);
       statsCache.expires = 0;
       return true;
@@ -152,18 +151,16 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
-    // Endpoint شروع پردازش
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        await env.QUEUE.put(`started:${chatId}`, Date.now().toString(), { expirationTtl: 3600 }); // TTL 1 ساعت
+        await env.QUEUE.put(`started:${chatId}`, Date.now().toString(), { expirationTtl: 3600 });
         await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد...", TOKEN);
       }
       return new Response('OK');
     }
 
-    // Endpoint پیشرفت
     if (path === '/api/progress' && request.method === 'POST') {
       const { user_id, total_chunks, uploaded_chunks } = await request.json();
       if (user_id) {
@@ -174,7 +171,6 @@ export default {
       return new Response('OK');
     }
 
-    // Endpoint موفقیت
     if (path === '/api/complete' && request.method === 'POST') {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
@@ -199,7 +195,6 @@ export default {
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید تا دیگران هم بتوانند از سرویس استفاده کنند.`, TOKEN);
-        // حذف کلیدهای موقتی که دیگر نیاز نیستند (با TTL قبلاً منقضی می‌شوند، اما برای آزادسازی فوری حذف می‌کنیم)
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
         await this.finishTask(env);
@@ -207,7 +202,6 @@ export default {
       return new Response('OK');
     }
 
-    // Endpoint خطا
     if (path === '/api/failed' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -221,7 +215,6 @@ export default {
       return new Response('OK');
     }
 
-    // Endpoint پاکسازی توسط cron
     if (path === '/api/cleanup' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -237,7 +230,6 @@ export default {
       return new Response('OK');
     }
 
-    // وب‌هوک اصلی تلگرام
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
@@ -253,7 +245,6 @@ export default {
           await answerCallback(cb.id, TOKEN).catch(e => console.error(e));
 
           if (data === 'new_link') {
-            // فقط کلیدهای ضروری را حذف می‌کنیم (state و status و started و request و ...)
             await Promise.all([
               env.QUEUE.delete(`status:${chatId}`),
               env.QUEUE.delete(`request:${chatId}`),
@@ -367,25 +358,34 @@ export default {
             return new Response('OK');
           }
 
+          // ========== بخش استارت اصلاح شده با لاگ ==========
           if (text === '/start') {
-            await Promise.all([
-              env.QUEUE.delete(`status:${chatId}`),
-              env.QUEUE.delete(`state:${chatId}`),
-              env.QUEUE.delete(`started:${chatId}`)
-            ]);
-            const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
-              `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
-              `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
-              `⚠️ <b>هشدار امنیتی:</b>\n` +
-              `فایل‌های شما در یک مخزن <b>عمومی</b> گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n\n` +
-              `⚠️ <b>مدیریت حجم مخزن:</b>\n` +
-              `• پس از دانلود فایل خود، حتماً روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n` +
-              `• این کار به همه اجازه می‌دهد از سرویس استفاده کنند و حجم مخزن کنترل شود.\n\n` +
-              `⚠️ لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n\n` +
-              `📢 حمایت: @maramivpn`;
-            await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
+            console.log(`Processing /start for chat ${chatId}`); // این خط را در لاگ کلادفلر چک کنید
+            try {
+              await Promise.all([
+                env.QUEUE.delete(`status:${chatId}`),
+                env.QUEUE.delete(`state:${chatId}`),
+                env.QUEUE.delete(`started:${chatId}`)
+              ]);
+              const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
+                `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
+                `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
+                `⚠️ <b>هشدار امنیتی:</b>\n` +
+                `فایل‌های شما در یک مخزن <b>عمومی</b> گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n\n` +
+                `⚠️ <b>مدیریت حجم مخزن:</b>\n` +
+                `• پس از دانلود فایل خود، حتماً روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n` +
+                `• این کار به همه اجازه می‌دهد از سرویس استفاده کنند و حجم مخزن کنترل شود.\n\n` +
+                `⚠️ لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n\n` +
+                `📢 حمایت: @maramivpn`;
+              await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
+              console.log(`Start message sent to ${chatId}`);
+            } catch (err) {
+              console.error(`Error in /start for ${chatId}:`, err);
+              await sendSimple(chatId, "⚠️ خطای داخلی در پردازش استارت. لطفاً دوباره تلاش کنید.", TOKEN);
+            }
             return new Response('OK');
           }
+          // ============================================
 
           let status = await env.QUEUE.get(`status:${chatId}`);
           if (status && status !== 'done' && status !== 'cancelled') {
