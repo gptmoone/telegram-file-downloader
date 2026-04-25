@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با تایم‌اوت ۲ ساعته برای فایل‌های حجیم
+// ربات دانلودر نهایی - با آمار حجم کل دانلودها و ریست فقط پردازش‌ها
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -13,9 +13,11 @@ const MAIN_KEYBOARD = {
 const MAX_CONCURRENT = 10;
 const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
-const START_WAIT_INTERVAL = 15000;
-const MAX_START_WAIT_ATTEMPTS = 3;
-const TASK_TIMEOUT = 120 * 60 * 1000;    // 120 دقیقه (کافی برای فایل‌های ۲ گیگابایتی)
+const START_WAIT_INTERVAL = 30000;
+const MAX_START_WAIT_ATTEMPTS = 2;
+const TASK_TIMEOUT = 60 * 60 * 1000;
+const WAIT_INTERVAL = 60000;
+const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 
@@ -76,17 +78,18 @@ async function getStats(env) {
   const now = Date.now();
   if (statsCache.data && statsCache.expires > now) return statsCache.data;
   
-  const [totalUsers, activeCount, queueListRaw, totalBranches] = await Promise.all([
+  const [totalUsers, activeCount, queueListRaw, totalBranches, totalVolume] = await Promise.all([
     env.QUEUE.get('totalUsers', 'json').then(v => v || 0),
     env.QUEUE.get('activeCount', 'json').then(v => v || 0),
     env.QUEUE.get('queueList', 'json').then(v => v || []),
-    env.QUEUE.get('totalBranches', 'json').then(v => v || 0)
+    env.QUEUE.get('totalBranches', 'json').then(v => v || 0),
+    env.QUEUE.get('totalVolume', 'json').then(v => v || 0)
   ]);
   let realActive = activeCount;
   if (realActive > MAX_CONCURRENT || realActive < 0) realActive = 0;
   if (realActive !== activeCount) await env.QUEUE.put('activeCount', realActive);
   
-  const result = { totalUsers, activeCount: realActive, waiting: queueListRaw.length, totalBranches };
+  const result = { totalUsers, activeCount: realActive, waiting: queueListRaw.length, totalLinks: totalBranches, totalVolume: totalVolume };
   statsCache = { data: result, expires: now + 30000 };
   return result;
 }
@@ -155,7 +158,7 @@ export default {
       if (user_id) {
         const chatId = user_id.split('_')[0];
         await env.QUEUE.put(`started:${chatId}`, Date.now().toString());
-        await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد. این عملیات ممکن است چند دقیقه طول بکشد...", TOKEN);
+        await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد...", TOKEN);
       }
       return new Response('OK');
     }
@@ -179,15 +182,37 @@ export default {
         await env.QUEUE.put(`last_branch:${chatId}`, branch);
         let total = await env.QUEUE.get('totalBranches', 'json') || 0;
         await env.QUEUE.put('totalBranches', total + 1);
-        statsCache.expires = 0;
+        
+        // اضافه کردن حجم فایل به حجم کل (totalVolume)
         const requestData = await env.QUEUE.get(`request:${chatId}`, 'json');
         const password = requestData?.password || '';
+        const fileSizeBytes = requestData?.fileSize || 0;
+        if (fileSizeBytes > 0) {
+          let currentVol = await env.QUEUE.get('totalVolume', 'json') || 0;
+          let newVol = currentVol + (fileSizeBytes / (1024 * 1024 * 1024)); // تبدیل به GB
+          await env.QUEUE.put('totalVolume', newVol);
+        }
+        
+        statsCache.expires = 0;
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید تا دیگران هم بتوانند از سرویس استفاده کنند.`, TOKEN);
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
         await this.finishTask(env);
+      }
+      return new Response('OK');
+    }
+
+    if (path === '/api/failed' && request.method === 'POST') {
+      const { user_id } = await request.json();
+      if (user_id) {
+        const chatId = user_id.split('_')[0];
+        await env.QUEUE.delete(`status:${chatId}`);
+        await env.QUEUE.delete(`request:${chatId}`);
+        await env.QUEUE.delete(`started:${chatId}`);
+        await this.finishTask(env);
+        await sendSimple(chatId, "❌ پردازش فایل شما با خطا مواجه شد. لطفاً دوباره تلاش کنید.", TOKEN);
       }
       return new Response('OK');
     }
@@ -260,7 +285,7 @@ export default {
             let warningMsg = '';
             if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن به حد مجاز رسیده است. لطفاً فایل‌های خود را حذف کنید تا امکان استفاده برای دیگران باقی بماند.</b>';
             else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
-            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n📁 فایل‌های فعال روی سرور: ${stats.totalBranches}${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
+            await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 لینک‌های ملی تولید شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
           }
           else if (data === 'status') {
             const status = await env.QUEUE.get(`status:${chatId}`);
@@ -322,11 +347,11 @@ export default {
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
+              // فقط activeCount و queueList را ریست کن، totalBranches و totalVolume را دست نزن
               await env.QUEUE.put('activeCount', 0);
               await env.QUEUE.put('queueList', JSON.stringify([]));
-              await env.QUEUE.put('totalBranches', 0);
               statsCache.expires = 0;
-              await sendSimple(chatId, "✅ آمار ربات بازنشانی شد.\n`activeCount` = 0، صف خالی شد.", TOKEN);
+              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد. تعداد لینک‌های ملی و حجم کل دست نخورده باقی ماندند.", TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN);
             }
@@ -374,7 +399,8 @@ export default {
                 await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
                 return new Response('OK');
               }
-              await env.QUEUE.put(`state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text }), { expirationTtl: 3600 });
+              // ذخیره حجم فایل در state برای استفاده در /api/complete
+              await env.QUEUE.put(`state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text, fileSize: fileSize || 0 }), { expirationTtl: 3600 });
               const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
               await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
             } else {
@@ -387,8 +413,9 @@ export default {
           if (userState.step === 'awaiting_password') {
             const password = text;
             const fileUrl = userState.url;
+            const fileSize = userState.fileSize || 0;
             await env.QUEUE.delete(`state:${chatId}`);
-            await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password }));
+            await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password, fileSize }));
 
             let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
             let queueList = await env.QUEUE.get('queueList', 'json') || [];
@@ -399,7 +426,7 @@ export default {
               this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
             } else {
-              queueList.push({ chatId, fileUrl, password });
+              queueList.push({ chatId, fileUrl, password, fileSize });
               await env.QUEUE.put('queueList', JSON.stringify(queueList));
               await env.QUEUE.put(`status:${chatId}`, 'waiting');
               await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueList.length}`, TOKEN);
@@ -439,7 +466,6 @@ export default {
       return;
     }
 
-    // منتظر شروع پردازش (حداکثر 45 ثانیه)
     let started = false;
     for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
@@ -449,16 +475,15 @@ export default {
       await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
     }
 
-    // منتظر اتمام پردازش (حداکثر 120 دقیقه)
     let branch = null;
-    const deadline = Date.now() + TASK_TIMEOUT;
-    while (Date.now() < deadline && !branch) {
-      await new Promise(r => setTimeout(r, 30000)); // هر 30 ثانیه چک کن
+    for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
+      await new Promise(r => setTimeout(r, WAIT_INTERVAL));
       branch = await env.QUEUE.get(`branch:${chatId}`);
+      if (branch) break;
     }
     if (!branch) {
-      console.error(`Timeout waiting for branch for ${chatId} after ${TASK_TIMEOUT/60000} minutes`);
-      await sendSimple(chatId, `❌ زمان انتظار برای پردازش فایل (${TASK_TIMEOUT/60000} دقیقه) به پایان رسید. شاید فایل خیلی حجیم است یا مشکلی در گیت‌هاب وجود دارد. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
+      console.error(`Timeout waiting for branch for ${chatId}`);
+      await sendSimple(chatId, `❌ زمان انتظار برای پردازش فایل (${TASK_TIMEOUT/60000} دقیقه) به پایان رسید. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
       await this.finishTask(env);
     }
   },
