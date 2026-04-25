@@ -445,5 +445,7 @@ export default {
     }
   },
 
-  // لازم نیست تابع runTask قدیمی حذف شود، ولی از runTaskWithRetry استفاده می‌کنیم.
+  //تست نسخه آخر لازم نیست تابع runTask قدیمی حذف شود، ولی از runTaskWithRetry استفاده می‌کنیم.
 };
+
+
