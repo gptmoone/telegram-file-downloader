@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با رفع خطای استارت و پیام خوش‌آمدگویی کامل
+// ربات دانلودر نهایی - با اصلاح پیام استارت (نمایش همیشگی پیام خوش‌آمد)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -358,12 +358,18 @@ export default {
             return new Response('OK');
           }
 
-          // ========== دستور استارت اصلاح شده (بدون try/catch اضافی) ==========
+          // ========== دستور استارت - همیشه پیام خوش‌آمد نمایش داده می‌شود ==========
           if (text === '/start') {
-            // پاکسازی وضعیتهای قبلی (در صورت وجود)
-            await env.QUEUE.delete(`status:${chatId}`);
-            await env.QUEUE.delete(`state:${chatId}`);
-            await env.QUEUE.delete(`started:${chatId}`);
+            // پاکسازی کلیدها (در صورت خطا، فقط لاگ می‌شود)
+            try {
+              await Promise.all([
+                env.QUEUE.delete(`status:${chatId}`),
+                env.QUEUE.delete(`state:${chatId}`),
+                env.QUEUE.delete(`started:${chatId}`)
+              ]);
+            } catch (err) {
+              console.error(`Error cleaning keys for /start for chat ${chatId}:`, err);
+            }
             
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
@@ -378,7 +384,7 @@ export default {
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
-          // ====================================================
+          // ================================================================
 
           let status = await env.QUEUE.get(`status:${chatId}`);
           if (status && status !== 'done' && status !== 'cancelled') {
