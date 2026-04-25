@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر - نسخه نهایی D1 با خطایابی کامل
+// ربات دانلودر - نسخه نهایی با رفع تکراری پیام‌ها
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -19,6 +19,9 @@ const WAIT_INTERVAL = 60000;
 const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
+
+// کش برای جلوگیری از اجرای مجدد یک دکمه در 3 ثانیه
+const lastCallbackProcessed = new Map();
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -69,15 +72,13 @@ async function getRepoSize(env) {
   return 0;
 }
 
-// ========== توابع D1 با لاگ کامل ==========
+// ========== توابع D1 ==========
 async function ensureGlobalStats(env) {
   const row = await env.DB.prepare('SELECT id FROM global_stats WHERE id = 1').first();
   if (!row) {
     await env.DB.prepare('INSERT INTO global_stats (id, total_links, total_volume_gb) VALUES (1, 0, 0)').run();
-    console.log('Created initial global_stats record');
   }
 }
-
 async function dbGetGlobalStats(env) {
   await ensureGlobalStats(env);
   const row = await env.DB.prepare('SELECT total_links, total_volume_gb FROM global_stats WHERE id = 1').first();
@@ -183,10 +184,7 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
-    // اطمینان از وجود رکورد global_stats در هر درخواست (فقط یک بار)
-    try {
-      await ensureGlobalStats(env);
-    } catch(e) { console.error('ensureGlobalStats failed:', e); }
+    try { await ensureGlobalStats(env); } catch(e) { console.error(e); }
 
     // API endpoints
     if (path === '/api/started' && request.method === 'POST') {
@@ -256,20 +254,28 @@ export default {
         const update = await request.json();
 
         // ثبت کاربر جدید
-        if (update.message?.chat?.id) {
-          await dbAddUser(env, update.message.chat.id.toString());
-        }
-        if (update.callback_query?.message?.chat?.id) {
-          await dbAddUser(env, update.callback_query.message.chat.id.toString());
-        }
+        if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
+        if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
         // دکمه‌ها
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
           const data = cb.data;
-          await answerCallback(cb.id, TOKEN);
+          const callbackId = cb.id;
 
+          // جلوگیری از پردازش مجدد یک دکمه در 3 ثانیه
+          const now = Date.now();
+          const lastTime = lastCallbackProcessed.get(`${chatId}_${data}`) || 0;
+          if (now - lastTime < 3000) {
+            return new Response('OK'); // تکراری، نادیده بگیر
+          }
+          lastCallbackProcessed.set(`${chatId}_${data}`, now);
+
+          // پاسخ فوری به تلگرام (ابتدا)
+          await answerCallback(callbackId, TOKEN);
+
+          // راهنما
           if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
               `این ربات لینک مستقیم را به لینک قابل دانلود در اینترنت ملی تبدیل می‌کند.\n\n` +
@@ -289,6 +295,7 @@ export default {
               `❤️ حمایت: @maramivpn`;
             await sendSimple(chatId, helpText, TOKEN);
           }
+          // آمار
           else if (data === 'stats') {
             try {
               const stats = await dbGetGlobalStats(env);
@@ -307,6 +314,7 @@ export default {
               await sendSimple(chatId, "⚠️ خطا در دریافت آمار. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
             }
           }
+          // وضعیت من
           else if (data === 'status') {
             try {
               const state = await dbGetUserState(env, chatId);
@@ -337,6 +345,7 @@ export default {
               await sendSimple(chatId, "⚠️ خطا در دریافت وضعیت. لطفاً بعداً تلاش کنید.", TOKEN);
             }
           }
+          // حذف فایل من
           else if (data === 'delete_my_file') {
             try {
               const lastBranch = await dbGetLastBranch(env, chatId);
@@ -363,10 +372,10 @@ export default {
               await sendSimple(chatId, "⚠️ خطا در حذف فایل. لطفاً بعداً تلاش کنید.", TOKEN);
             }
           }
+          // لینک جدید
           else if (data === 'new_link') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
-            // همچنین حذف شاخه گیت‌هاب قبلی (اگر وجود داشته)
             const lastBranch = await dbGetLastBranch(env, chatId);
             if (lastBranch) {
               try {
@@ -419,9 +428,8 @@ export default {
             return new Response('OK');
           }
 
-          // دریافت لینک جدید (خودکار لغو قبلی)
+          // دریافت لینک جدید
           if (text.match(/^https?:\/\//)) {
-            // پاک کردن وضعیت قبلی و شاخه قبلی
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
             const lastBranch = await dbGetLastBranch(env, chatId);
