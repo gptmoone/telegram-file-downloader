@@ -405,4 +405,128 @@ export default {
               }
               const fileSize = await getFileSize(text);
               if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
-                await se
+                await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
+                return new Response('OK');
+              }
+              await env.QUEUE.put(`state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text, fileSize: fileSize || 0 }), { expirationTtl: 3600 });
+              const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
+              await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
+            } else {
+              await sendSimple(chatId, "❌ لینک معتبر نیست (با http:// یا https:// شروع شود).", TOKEN);
+            }
+            return new Response('OK');
+          }
+
+          const userState = JSON.parse(userStateRaw);
+          if (userState.step === 'awaiting_password') {
+            const password = text;
+            const fileUrl = userState.url;
+            const fileSize = userState.fileSize || 0;
+            await env.QUEUE.delete(`state:${chatId}`);
+            await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password, fileSize }), { expirationTtl: 7200 });
+
+            let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
+            let queueList = await env.QUEUE.get('queueList', 'json') || [];
+
+            if (activeCount < MAX_CONCURRENT) {
+              await env.QUEUE.put('activeCount', activeCount + 1);
+              await env.QUEUE.put(`status:${chatId}`, 'processing');
+              this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
+              await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
+            } else {
+              queueList.push({ chatId, fileUrl, password, fileSize });
+              await env.QUEUE.put('queueList', JSON.stringify(queueList));
+              await env.QUEUE.put(`status:${chatId}`, 'waiting');
+              await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueList.length}`, TOKEN);
+            }
+            return new Response('OK');
+          }
+        }
+        return new Response('OK');
+      } catch (err) {
+        console.error(err);
+        return new Response('Error', { status: 500 });
+      }
+    }
+    return new Response('Bot is running');
+  },
+
+  async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
+    const userId = `${chatId}_${Date.now()}`;
+    let retry = 0;
+    let workflowSent = false;
+
+    while (retry <= MAX_RETRIES && !workflowSent) {
+      const sent = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN);
+      if (sent) {
+        workflowSent = true;
+        break;
+      }
+      retry++;
+      if (retry <= MAX_RETRIES) {
+        await sendSimple(chatId, `⚠️ تلاش ${retry} ناموفق بود. تلاش مجدد در ${RETRY_INTERVAL/1000} ثانیه...`, TOKEN);
+        await new Promise(r => setTimeout(r, RETRY_INTERVAL));
+      }
+    }
+    if (!workflowSent) {
+      await sendSimple(chatId, "❌ پس از تلاش، درخواست به گیت‌هاب ارسال نشد. لطفاً دوباره تلاش کنید.", TOKEN);
+      await this.finishTask(env);
+      return;
+    }
+
+    let started = false;
+    for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
+      await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
+      if (await env.QUEUE.get(`started:${chatId}`)) { started = true; break; }
+    }
+    if (!started) {
+      await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
+    }
+
+    let branch = null;
+    for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
+      await new Promise(r => setTimeout(r, WAIT_INTERVAL));
+      branch = await env.QUEUE.get(`branch:${chatId}`);
+      if (branch) break;
+    }
+    if (!branch) {
+      console.error(`Timeout waiting for branch for ${chatId}`);
+      await sendSimple(chatId, `❌ زمان انتظار برای پردازش فایل (${TASK_TIMEOUT/60000} دقیقه) به پایان رسید. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
+      await this.finishTask(env);
+    }
+  },
+
+  async sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN) {
+    const GITHUB_TOKEN = env.GH_TOKEN;
+    const GITHUB_OWNER = 'gptmoone';
+    const GITHUB_REPO = 'telegram-file-downloader';
+    try {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${GITHUB_TOKEN}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'CloudflareWorkerBot/1.0'
+        },
+        body: JSON.stringify({ ref: 'main', inputs: { file_url: fileUrl, zip_password: password, user_id: userId } })
+      });
+      return res.ok;
+    } catch { return false; }
+  },
+
+  async finishTask(env) {
+    let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
+    if (activeCount > 0) activeCount--;
+    await env.QUEUE.put('activeCount', activeCount);
+    statsCache.expires = 0;
+
+    let queueList = await env.QUEUE.get('queueList', 'json') || [];
+    if (queueList.length > 0) {
+      const next = queueList.shift();
+      await env.QUEUE.put('queueList', JSON.stringify(queueList));
+      await env.QUEUE.put('activeCount', activeCount + 1);
+      await env.QUEUE.put(`status:${next.chatId}`, 'processing');
+      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
+    }
+  }
+};
