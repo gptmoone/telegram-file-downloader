@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با تلاش مجدد خودکار در صورت عدم شروع پردازش
+// ربات دانلودر نهایی - با هشدار امنیتی و راهنمای کامل
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -110,7 +110,6 @@ export default {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        // ثبت زمان شروع برای جلوگیری از انتظار بیشتر
         await env.QUEUE.put(`started:${chatId}`, Date.now().toString());
         await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد. این عملیات ممکن است چند دقیقه طول بکشد...", TOKEN);
       }
@@ -141,7 +140,7 @@ export default {
         const requestData = await env.QUEUE.get(`request:${chatId}`, 'json');
         const password = requestData?.password || '';
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
-        const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <code>7-Zip</code> یا <code>WinRAR</code>، فایل <b>archive.7z.001</b> را باز کنید. نرم‌افزار به صورت خودکار همه تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
+        const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.`, TOKEN);
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
@@ -200,14 +199,15 @@ export default {
               `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
               `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n\n` +
               `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
-              `• فایل ZIP دانلود شده را با نرم‌افزارهایی مثل 7-Zip یا WinRAR باز کنید.\n` +
+              `• فایل ZIP دانلود شده را با نرم‌افزارهایی مثل <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
               `• داخل پوشه استخراج شده، فایل‌هایی با پسوند <code>.001</code>، <code>.002</code> و ... می‌بینید.\n` +
-              `• روی فایل <b>archive.7z.001</b> کلیک راست کرده و گزینه Extract Here را انتخاب کنید.\n` +
+              `• روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه <b>Extract Here</b> (یا استخراج در اینجا) را انتخاب کنید.\n` +
               `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.\n\n` +
-              `⚠️ <b>توجه:</b>\n` +
+              `⚠️ <b>توجه امنیتی:</b>\n` +
+              `• فایل‌ها در یک مخزن عمومی گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
+              `• لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n` +
               `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n` +
-              `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n` +
-              `• لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل شما حذف می‌شود.\n\n` +
+              `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
               `❤️ <b>حمایت:</b> عضو کانال ما شوید: @maramivpn`;
             await sendSimple(chatId, helpText, TOKEN);
           }
@@ -280,6 +280,8 @@ export default {
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
+              `⚠️ <b>هشدار امنیتی:</b>\n` +
+              `فایل‌های شما در یک مخزن <b>عمومی</b> گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n\n` +
               `⚠️ لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n\n` +
               `📢 حمایت: @maramivpn`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
@@ -322,7 +324,6 @@ export default {
             if (activeCount < MAX_CONCURRENT) {
               await env.QUEUE.put('activeCount', activeCount + 1);
               await env.QUEUE.put(`status:${chatId}`, 'processing');
-              // شروع فرآیند با قابلیت تلاش مجدد
               this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...", TOKEN);
             } else {
@@ -343,17 +344,14 @@ export default {
     return new Response('Bot is running');
   },
 
-  // اجرای تسک با قابلیت تلاش مجدد خودکار
   async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
     const userId = `${chatId}_${Date.now()}`;
     let retryCount = 0;
     let success = false;
 
     while (retryCount < MAX_RETRIES && !success) {
-      // ارسال درخواست به گیت‌هاب
       const ghRes = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN);
       if (!ghRes) {
-        // خطا در ارسال، یک بار دیگر تلاش کن
         retryCount++;
         if (retryCount < MAX_RETRIES) {
           await sendSimple(chatId, `⚠️ تلاش ${retryCount} ناموفق بود. تلاش مجدد در ${RETRY_INTERVAL/1000} ثانیه...`, TOKEN);
@@ -366,7 +364,6 @@ export default {
         }
       }
 
-      // منتظر پیام شروع از سمت گیت‌هاب (حداکثر RETRY_INTERVAL ثانیه)
       const started = await this.waitForStart(chatId, env, RETRY_INTERVAL);
       if (started) {
         success = true;
@@ -375,7 +372,6 @@ export default {
         retryCount++;
         if (retryCount < MAX_RETRIES) {
           await sendSimple(chatId, `⚠️ پردازش شروع نشد. تلاش مجدد ${retryCount} از ${MAX_RETRIES}...`, TOKEN);
-          // درخواست بعدی با همان userId فرستاده می‌شود (تکراری)
         } else {
           await sendSimple(chatId, `❌ پس از ${MAX_RETRIES} تلاش، پردازش آغاز نشد. لطفاً دوباره تلاش کنید.`, TOKEN);
           await this.finishTask(env);
@@ -383,9 +379,6 @@ export default {
         }
       }
     }
-
-    // حالا که شروع شد، منتظر پایان باشیم (کار توسط endpoint /api/complete انجام می‌شود)
-    // فقط اگر timeout شد، finishTask اجرا می‌شود.
   },
 
   async sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN) {
@@ -425,7 +418,7 @@ export default {
     while (Date.now() - startTime < timeoutMs) {
       const started = await env.QUEUE.get(startKey);
       if (started) return true;
-      await new Promise(r => setTimeout(r, 5000)); // هر 5 ثانیه چک کن
+      await new Promise(r => setTimeout(r, 5000));
     }
     return false;
   },
@@ -443,9 +436,5 @@ export default {
       await env.QUEUE.put(`status:${next.chatId}`, 'processing');
       this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
     }
-  },
-
-  //تست نسخه آخر لازم نیست تابع runTask قدیمی حذف شود، ولی از runTaskWithRetry استفاده می‌کنیم.
+  }
 };
-
-
