@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر - نسخه نهایی با مقاومت کامل در برابر محدودیت KV
+// ربات دانلودر نهایی - حذف کامل وابستگی KV از دکمه «لینک جدید»
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -20,12 +20,11 @@ const WAIT_INTERVAL = 60000;
 const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
-const KV_TIMEOUT_MS = 1000; // 1 ثانیه
 
 let statsCache = { data: null, expires: 0 };
 let userCheckCache = new Map();
 
-// === توابع کمکی با timeout کوتاه ===
+// === توابع کمکی با timeout (فقط برای بخش‌های ضروری) ===
 async function withTimeout(promise, ms, fallback = null) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -41,15 +40,14 @@ async function withTimeout(promise, ms, fallback = null) {
     return fallback;
   }
 }
-
-async function safeKVGet(env, key, fallback = null) {
-  return withTimeout(env.QUEUE.get(key), KV_TIMEOUT_MS, fallback);
+function safeKVGet(env, key, fallback = null) {
+  return withTimeout(env.QUEUE.get(key), 1500, fallback);
 }
-async function safeKVPut(env, key, value, options = {}) {
-  return withTimeout(env.QUEUE.put(key, value, options), KV_TIMEOUT_MS, null);
+function safeKVPut(env, key, value, options = {}) {
+  return withTimeout(env.QUEUE.put(key, value, options), 1500, null);
 }
-async function safeKVDelete(env, key) {
-  return withTimeout(env.QUEUE.delete(key), KV_TIMEOUT_MS, null);
+function safeKVDelete(env, key) {
+  return withTimeout(env.QUEUE.delete(key), 1500, null);
 }
 
 // ===== توابع اصلی =====
@@ -342,20 +340,8 @@ export default {
             })().catch(e => console.error(e));
           }
           else if (data === 'new_link') {
-            // ========== لینک جدید: بدون منتظر ماندن برای حذف ==========
-            (async () => {
-              await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
-              // پاکسازی پس‌زمینه (بدون wait)
-              Promise.allSettled([
-                safeKVDelete(env, `status:${chatId}`),
-                safeKVDelete(env, `request:${chatId}`),
-                safeKVDelete(env, `started:${chatId}`),
-                safeKVDelete(env, `state:${chatId}`),
-                safeKVDelete(env, `total_chunks:${chatId}`),
-                safeKVDelete(env, `uploaded_chunks:${chatId}`)
-              ]).catch(e => console.error(e));
-              try { await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO); } catch(e) {}
-            })().catch(e => console.error(e));
+            // ========== دکمه لینک جدید: بدون هیچ عملیات KV ==========
+            await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
           else if (data === 'delete_my_file') {
             (async () => {
@@ -421,7 +407,7 @@ export default {
               safeKVDelete(env, `status:${chatId}`),
               safeKVDelete(env, `state:${chatId}`),
               safeKVDelete(env, `started:${chatId}`)
-            ]);
+            });
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در <b>اینترنت ملی</b> دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
