@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - کاهش حداکثری delete و مقاوم در برابر محدودیت KV
+// ربات دانلودر - مقاوم در برابر خطاهای KV (بدون توقف)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -21,9 +21,8 @@ const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 
-let statsCache = { data: null, expires: 0 };
+let statsCache = { data: null, expires: 0, errorCount: 0 };
 let userCheckCache = new Map();
-let kvLimitWarningFlag = false;
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -51,7 +50,7 @@ async function answerCallback(callbackId, TOKEN) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ callback_query_id: callbackId })
-  }).catch(e => console.error('answerCallback error:', e));
+  }).catch(e => console.error('answerCallback error (ignored):', e));
 }
 
 async function getRepoSize(env) {
@@ -89,16 +88,15 @@ async function getStats(env) {
     ]);
     let realActive = activeCount;
     if (realActive > MAX_CONCURRENT || realActive < 0) realActive = 0;
-    if (realActive !== activeCount) await env.QUEUE.put('activeCount', realActive);
+    if (realActive !== activeCount) await env.QUEUE.put('activeCount', realActive).catch(e => console.error(e));
     
     const result = { totalUsers, activeCount: realActive, waiting: queueListRaw.length, totalLinks: totalBranches, totalVolume: totalVolume };
-    statsCache = { data: result, expires: now + 60000 };
-    kvLimitWarningFlag = false;
+    statsCache = { data: result, expires: now + 60000, errorCount: 0 };
     return result;
   } catch (err) {
     console.error('KV read error in getStats:', err);
-    kvLimitWarningFlag = true;
-    if (statsCache.data) return statsCache.data;
+    statsCache.errorCount++;
+    if (statsCache.data) return statsCache.data; // return stale cache
     return { totalUsers: 0, activeCount: 0, waiting: 0, totalLinks: 0, totalVolume: 0 };
   }
 }
@@ -121,8 +119,7 @@ async function updateStats(env, chatId) {
       statsCache.expires = 0;
     }
   } catch (err) {
-    console.error('KV error in updateStats:', err);
-    kvLimitWarningFlag = true;
+    console.error('KV error in updateStats (ignored):', err);
   }
 }
 
@@ -165,6 +162,7 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
+    // --- API endpoints (بدون تغییر) ---
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -233,7 +231,7 @@ export default {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        await Promise.all([
+        await Promise.allSettled([
           env.QUEUE.delete(`branch:${chatId}`),
           env.QUEUE.delete(`last_branch:${chatId}`),
           env.QUEUE.delete(`status:${chatId}`),
@@ -244,84 +242,61 @@ export default {
       return new Response('OK');
     }
 
+    // --- Webhook اصلی تلگرام ---
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
 
-        if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
-        if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
+        // آمار کاربر (در صورت امکان، خطا نادیده گرفته شود)
+        try {
+          if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
+          if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
+        } catch(e) { console.error(e); }
 
-        // ========== دکمه‌ها (پاسخ فوری + تحمل خطای delete) ==========
+        // دکمه‌ها (Callback Query)
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id;
           const data = cb.data;
 
-          // پاسخ فوری به تلگرام
+          // پاسخ فوری (اجباری، حتی اگر خطا هم بده)
           answerCallback(cb.id, TOKEN);
 
-          // پردازش پس‌زمینه با try-catch
-          if (data === 'new_link') {
-            (async () => {
-              try {
-                // فقط کلیدهای ضروری را حذف می‌کنیم (status, request, started)
-                // اگر delete خطا داد، نادیده می‌گیریم و ادامه می‌دهیم
-                await Promise.allSettled([
-                  env.QUEUE.delete(`status:${chatId}`),
-                  env.QUEUE.delete(`request:${chatId}`),
-                  env.QUEUE.delete(`started:${chatId}`)
-                ]);
-                // این کلیدها TTL دارند و حذفشان ضروری نیست، فقط برای آزادسازی سریع تلاش می‌کنیم
-                await Promise.allSettled([
-                  env.QUEUE.delete(`state:${chatId}`),
-                  env.QUEUE.delete(`total_chunks:${chatId}`),
-                  env.QUEUE.delete(`uploaded_chunks:${chatId}`)
-                ]);
-              } catch (err) {
-                console.error('Delete error in new_link (ignored):', err);
-              }
-              await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO);
-              await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
-            })().catch(e => console.error(e));
-          }
-          else if (data === 'help') {
-            (async () => {
-              const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
-                `این ربات لینک مستقیم فایل را به لینک قابل دانلود در <b>اینترنت ملی</b> تبدیل می‌کند.\n\n` +
-                `🔹 <b>نحوه استفاده:</b>\n` +
-                `1️⃣ اگر لینک مستقیم ندارید، فایل خود را به ربات <code>@filesto_bot</code> فوروارد کنید.\n` +
-                `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
-                `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
-                `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n` +
-                `5️⃣ پس از دانلود، روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور حذف شود و دیگران هم بتوانند استفاده کنند.\n\n` +
-                `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
-                `• فایل ZIP دانلود شده را با نرم‌افزارهایی مثل <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
-                `• داخل پوشه استخراج شده، فایل‌هایی با پسوند <code>.001</code>، <code>.002</code> و ... می‌بینید.\n` +
-                `• روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه <b>Extract Here</b> (یا استخراج در اینجا) را انتخاب کنید.\n` +
-                `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.\n\n` +
-                `⚠️ <b>توجه امنیتی:</b>\n` +
-                `• فایل‌ها در یک مخزن عمومی گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
-                `• لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n` +
-                `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n` +
-                `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
-                `❤️ <b>حمایت:</b> عضو کانال ما شوید: @maramivpn`;
-              await sendSimple(chatId, helpText, TOKEN);
-            })().catch(e => console.error(e));
+          // پردازش هر دکمه در try-catch جداگانه
+          if (data === 'help') {
+            // این دکمه هیچ KV ای را نمی‌خواند، همیشه کار می‌کند
+            const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
+              `این ربات لینک مستقیم فایل را به لینک قابل دانلود در <b>اینترنت ملی</b> تبدیل می‌کند.\n\n` +
+              `🔹 <b>نحوه استفاده:</b>\n` +
+              `1️⃣ اگر لینک مستقیم ندارید، فایل خود را به ربات <code>@filesto_bot</code> فوروارد کنید.\n` +
+              `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
+              `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
+              `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n` +
+              `5️⃣ پس از دانلود، روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور حذف شود و دیگران هم بتوانند استفاده کنند.\n\n` +
+              `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
+              `• فایل ZIP دانلود شده را با نرم‌افزارهایی مثل <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
+              `• داخل پوشه استخراج شده، فایل‌هایی با پسوند <code>.001</code>، <code>.002</code> و ... می‌بینید.\n` +
+              `• روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه <b>Extract Here</b> (یا استخراج در اینجا) را انتخاب کنید.\n` +
+              `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.\n\n` +
+              `⚠️ <b>توجه امنیتی:</b>\n` +
+              `• فایل‌ها در یک مخزن عمومی گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
+              `• لینک دانلود تا ۳ ساعت معتبر است و پس از آن فایل حذف می‌شود.\n` +
+              `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n` +
+              `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
+              `❤️ <b>حمایت:</b> عضو کانال ما شوید: @maramivpn`;
+            await sendSimple(chatId, helpText, TOKEN);
           }
           else if (data === 'stats') {
+            // آمار: اگر KV خطا بده، پیام ساده‌ای با خطا نمایش می‌دهد
             (async () => {
               try {
                 const stats = await getStats(env);
                 const repoSize = await getRepoSize(env);
                 const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
-                let warningMsg = '';
-                if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن به حد مجاز رسیده است. لطفاً فایل‌های خود را حذف کنید تا امکان استفاده برای دیگران باقی بماند.</b>';
-                else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
-                let limitMsg = kvLimitWarningFlag ? '\n\n⚠️ <b>ربات به دلیل ترافیک بالا با محدودیت موقتی روبرو است. برخی عملیات ممکن است کندتر از معمول انجام شوند. لطفاً چند دقیقه دیگر تلاش کنید.</b>' : '';
-                await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}${limitMsg}\n\n📢 @maramivpn`, TOKEN);
+                await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${stats.totalUsers}\n🔄 در حال پردازش: ${stats.activeCount}\n⏳ در صف انتظار: ${stats.waiting}\n🔗 کل لینک‌های ملی ساخته شده: ${stats.totalLinks}\n💾 حجم کل فایل‌های دانلود شده: ${stats.totalVolume.toFixed(2)} گیگابایت${sizeMsg}\n\n📢 @maramivpn`, TOKEN);
               } catch (err) {
-                console.error('Error in stats button:', err);
-                await sendSimple(chatId, "⚠️ امکان دریافت آمار وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
+                console.error('Stats error:', err);
+                await sendSimple(chatId, "⚠️ در حال حاضر امکان دریافت آمار وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
               }
             })().catch(e => console.error(e));
           }
@@ -350,9 +325,27 @@ export default {
                   await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
                 }
               } catch (err) {
-                console.error('Error in status button:', err);
+                console.error('Status error:', err);
                 await sendSimple(chatId, "⚠️ امکان دریافت وضعیت وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
               }
+            })().catch(e => console.error(e));
+          }
+          else if (data === 'new_link') {
+            (async () => {
+              try {
+                // تلاش می‌کنیم وضعیت قبلی را پاک کنیم، اما اگر خطا بده (محدودیت delete) نادیده می‌گیریم
+                await Promise.allSettled([
+                  env.QUEUE.delete(`status:${chatId}`),
+                  env.QUEUE.delete(`request:${chatId}`),
+                  env.QUEUE.delete(`started:${chatId}`),
+                  env.QUEUE.delete(`state:${chatId}`),
+                  env.QUEUE.delete(`total_chunks:${chatId}`),
+                  env.QUEUE.delete(`uploaded_chunks:${chatId}`)
+                ]);
+              } catch (err) { /* ignore */ }
+              // حذف شاخه گیت‌هاب (اگر ممکن باشد)
+              try { await deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO); } catch(e) {}
+              await sendSimple(chatId, "✅ وضعیت قبلی شما پاک شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
             })().catch(e => console.error(e));
           }
           else if (data === 'delete_my_file') {
@@ -371,7 +364,7 @@ export default {
                   await sendSimple(chatId, "❌ هیچ فایل فعالی برای حذف یافت نشد (یا قبلاً حذف شده است).", TOKEN);
                 }
               } catch (err) {
-                console.error('Error in delete_my_file:', err);
+                console.error(err);
                 await sendSimple(chatId, "⚠️ امکان حذف فایل وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
               }
             })().catch(e => console.error(e));
@@ -386,10 +379,10 @@ export default {
                   env.QUEUE.delete(`started:${chatId}`)
                 ]);
                 let q = await env.QUEUE.get('queueList', 'json') || [];
-                await env.QUEUE.put('queueList', JSON.stringify(q.filter(i => i.chatId !== chatId)));
+                await env.QUEUE.put('queueList', JSON.stringify(q.filter(i => i.chatId !== chatId))).catch(e => console.error(e));
                 await sendSimple(chatId, "❌ عملیات لغو شد.", TOKEN);
               } catch (err) {
-                console.error('Error in cancel:', err);
+                console.error(err);
                 await sendSimple(chatId, "⚠️ امکان لغو وجود ندارد. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
               }
             })().catch(e => console.error(e));
@@ -397,7 +390,7 @@ export default {
           return new Response('OK');
         }
 
-        // ========== پیام متنی ==========
+        // پیام متنی
         if (update.message?.text) {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
@@ -408,10 +401,9 @@ export default {
               await env.QUEUE.put('activeCount', 0);
               await env.QUEUE.put('queueList', JSON.stringify([]));
               statsCache.expires = 0;
-              kvLimitWarningFlag = false;
-              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد. تعداد کل لینک‌های ملی و حجم کل دست نخورده باقی ماندند.", TOKEN);
+              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد.", TOKEN);
             } else {
-              await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN);
+              await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
             }
             return new Response('OK');
           }
@@ -438,21 +430,21 @@ export default {
             return new Response('OK');
           }
 
-          let status = await env.QUEUE.get(`status:${chatId}`);
+          let status = await env.QUEUE.get(`status:${chatId}`).catch(e => null);
           if (status && status !== 'done' && status !== 'cancelled') {
             await sendSimple(chatId, `⚠️ شما یک درخواست فعال دارید (${status === 'waiting' ? 'در صف' : 'در حال پردازش'}). لطفاً صبر کنید یا از دکمه لغو استفاده کنید.`, TOKEN);
             return new Response('OK');
           }
 
-          const userStateRaw = await env.QUEUE.get(`state:${chatId}`);
+          const userStateRaw = await env.QUEUE.get(`state:${chatId}`).catch(e => null);
           if (!userStateRaw) {
             if (text.match(/^https?:\/\//)) {
               const repoSize = await getRepoSize(env);
               if (repoSize >= REPO_SIZE_LIMIT_GB) {
-                await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده است. لطفاً چند ساعت بعد تلاش کنید یا از دیگر کاربران بخواهید فایل‌های خود را حذف کنند.\n\n📊 حجم فعلی: ${repoSize.toFixed(1)} گیگابایت`, TOKEN);
+                await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده است. لطفاً چند ساعت بعد تلاش کنید.`, TOKEN);
                 return new Response('OK');
               } else if (repoSize >= REPO_SIZE_WARNING_GB) {
-                await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). لطفاً پس از دانلود فایل خود، آن را حذف کنید تا دیگران هم بتوانند استفاده کنند.`, TOKEN);
+                await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). پس از دانلود، فایل خود را حذف کنید.`, TOKEN);
               }
               const fileSize = await getFileSize(text);
               if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
@@ -473,11 +465,11 @@ export default {
             const password = text;
             const fileUrl = userState.url;
             const fileSize = userState.fileSize || 0;
-            await env.QUEUE.delete(`state:${chatId}`);
+            await env.QUEUE.delete(`state:${chatId}`).catch(e => console.error(e));
             await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password, fileSize }), { expirationTtl: 7200 });
 
-            let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
-            let queueList = await env.QUEUE.get('queueList', 'json') || [];
+            let activeCount = await env.QUEUE.get('activeCount', 'json').catch(e => 0) || 0;
+            let queueList = await env.QUEUE.get('queueList', 'json').catch(e => []) || [];
 
             if (activeCount < MAX_CONCURRENT) {
               await env.QUEUE.put('activeCount', activeCount + 1);
@@ -566,12 +558,12 @@ export default {
   },
 
   async finishTask(env) {
-    let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
+    let activeCount = await env.QUEUE.get('activeCount', 'json').catch(e => 0) || 0;
     if (activeCount > 0) activeCount--;
     await env.QUEUE.put('activeCount', activeCount);
     statsCache.expires = 0;
 
-    let queueList = await env.QUEUE.get('queueList', 'json') || [];
+    let queueList = await env.QUEUE.get('queueList', 'json').catch(e => []) || [];
     if (queueList.length > 0) {
       const next = queueList.shift();
       await env.QUEUE.put('queueList', JSON.stringify(queueList));
