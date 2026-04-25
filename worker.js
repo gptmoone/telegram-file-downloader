@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر - نسخه D1 با پاسخ فوری دکمه‌ها
+// ربات دانلودر - نسخه D1 با پاسخ مستقیم (بدون پیام آماده‌سازی)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -315,8 +315,7 @@ export default {
             await sendSimple(chatId, helpText, TOKEN);
           }
           else if (data === 'stats') {
-            // پاسخ فوری با پیام آماده‌سازی
-            await sendSimple(chatId, "📊 در حال آماده سازی آمار...", TOKEN);
+            // حذف پیام «در حال آماده سازی...» و ارسال مستقیم آمار
             (async () => {
               try {
                 const stats = await dbGetGlobalStats(env);
@@ -337,7 +336,6 @@ export default {
             })().catch(e => console.error(e));
           }
           else if (data === 'status') {
-            await sendSimple(chatId, "📊 در حال آماده سازی وضعیت...", TOKEN);
             (async () => {
               try {
                 const state = await dbGetUserState(env, chatId);
@@ -375,7 +373,6 @@ export default {
             await sendSimple(chatId, "✅ درخواست قبلی شما لغو شد. اکنون لینک جدید را ارسال کنید.\n(برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید)", TOKEN);
           }
           else if (data === 'delete_my_file') {
-            await sendSimple(chatId, "🗑️ در حال آماده سازی حذف فایل...", TOKEN);
             (async () => {
               try {
                 const lastBranch = await dbGetLastBranch(env, chatId);
@@ -447,7 +444,6 @@ export default {
 
           // دریافت لینک جدید
           if (text.match(/^https?:\/\//)) {
-            // پاک کردن هر وضعیت قبلی و شاخه قبلی
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
             const lastBranch = await dbGetLastBranch(env, chatId);
