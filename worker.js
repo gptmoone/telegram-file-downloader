@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر نهایی - با آمار تجمعی لینک‌های ملی و عدم کاهش آن
+// ربات دانلودر نهایی - بهینه برای کاهش عملیات Delete KV
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -133,12 +133,9 @@ async function deleteUserBranch(chatId, env, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_
       }
     });
     if (res.ok) {
-      // حذف خط کاهش totalBranches: تعداد کل لینک‌های ملی نباید کاهش یابد
-      // let total = await env.QUEUE.get('totalBranches', 'json') || 0;
-      // if (total > 0) await env.QUEUE.put('totalBranches', total - 1);
-      
-      statsCache.expires = 0;
+      // فقط last_branch را حذف می‌کنیم، totalBranches را کاهش نمی‌دهیم
       await env.QUEUE.delete(`last_branch:${chatId}`);
+      statsCache.expires = 0;
       return true;
     }
   } catch (e) { console.error('Delete branch error:', e); }
@@ -155,26 +152,29 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
+    // Endpoint شروع پردازش
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        await env.QUEUE.put(`started:${chatId}`, Date.now().toString());
+        await env.QUEUE.put(`started:${chatId}`, Date.now().toString(), { expirationTtl: 3600 }); // TTL 1 ساعت
         await sendSimple(chatId, "🔄 پردازش فایل روی گیت‌هاب آغاز شد...", TOKEN);
       }
       return new Response('OK');
     }
 
+    // Endpoint پیشرفت
     if (path === '/api/progress' && request.method === 'POST') {
       const { user_id, total_chunks, uploaded_chunks } = await request.json();
       if (user_id) {
         const chatId = user_id.split('_')[0];
-        if (total_chunks) await env.QUEUE.put(`total_chunks:${chatId}`, total_chunks, { expirationTtl: 3600 });
-        if (uploaded_chunks !== undefined) await env.QUEUE.put(`uploaded_chunks:${chatId}`, uploaded_chunks);
+        if (total_chunks) await env.QUEUE.put(`total_chunks:${chatId}`, total_chunks, { expirationTtl: 7200 });
+        if (uploaded_chunks !== undefined) await env.QUEUE.put(`uploaded_chunks:${chatId}`, uploaded_chunks, { expirationTtl: 7200 });
       }
       return new Response('OK');
     }
 
+    // Endpoint موفقیت
     if (path === '/api/complete' && request.method === 'POST') {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
@@ -183,17 +183,15 @@ export default {
         await env.QUEUE.put(`status:${chatId}`, 'done');
         await env.QUEUE.put(`last_branch:${chatId}`, branch);
         
-        // افزایش تعداد کل لینک‌های ملی ساخته شده (فقط موفقیت)
         let total = await env.QUEUE.get('totalBranches', 'json') || 0;
         await env.QUEUE.put('totalBranches', total + 1);
         
-        // اضافه کردن حجم فایل به حجم کل دانلود شده
         const requestData = await env.QUEUE.get(`request:${chatId}`, 'json');
         const password = requestData?.password || '';
         const fileSizeBytes = requestData?.fileSize || 0;
         if (fileSizeBytes > 0) {
           let currentVol = await env.QUEUE.get('totalVolume', 'json') || 0;
-          let newVol = currentVol + (fileSizeBytes / (1024 * 1024 * 1024)); // تبدیل به GB
+          let newVol = currentVol + (fileSizeBytes / (1024 * 1024 * 1024));
           await env.QUEUE.put('totalVolume', newVol);
         }
         
@@ -201,6 +199,7 @@ export default {
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود، فایل ZIP را باز کنید. داخل پوشه استخراج شده، چند فایل با پسوند .001، .002 و ... می‌بینید. با نرم‌افزار <b>7-Zip</b> یا <b>WinRAR</b>، روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه استخراج (Extract) را انتخاب کنید. نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (تا ۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n📌 این لینک با اینترنت ملی و بدون فیلترشکن قابل دانلود است.\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید تا دیگران هم بتوانند از سرویس استفاده کنند.`, TOKEN);
+        // حذف کلیدهای موقتی که دیگر نیاز نیستند (با TTL قبلاً منقضی می‌شوند، اما برای آزادسازی فوری حذف می‌کنیم)
         await env.QUEUE.delete(`request:${chatId}`);
         await env.QUEUE.delete(`started:${chatId}`);
         await this.finishTask(env);
@@ -208,6 +207,7 @@ export default {
       return new Response('OK');
     }
 
+    // Endpoint خطا
     if (path === '/api/failed' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -221,6 +221,7 @@ export default {
       return new Response('OK');
     }
 
+    // Endpoint پاکسازی توسط cron
     if (path === '/api/cleanup' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -229,12 +230,14 @@ export default {
           env.QUEUE.delete(`branch:${chatId}`),
           env.QUEUE.delete(`last_branch:${chatId}`),
           env.QUEUE.delete(`status:${chatId}`),
-          env.QUEUE.delete(`started:${chatId}`)
+          env.QUEUE.delete(`started:${chatId}`),
+          env.QUEUE.delete(`request:${chatId}`)
         ]);
       }
       return new Response('OK');
     }
 
+    // وب‌هوک اصلی تلگرام
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
@@ -242,6 +245,7 @@ export default {
         if (update.message?.chat?.id) await updateStats(env, update.message.chat.id);
         if (update.callback_query?.message?.chat?.id) await updateStats(env, update.callback_query.message.chat.id);
 
+        // دکمه‌ها
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id;
@@ -249,6 +253,7 @@ export default {
           await answerCallback(cb.id, TOKEN).catch(e => console.error(e));
 
           if (data === 'new_link') {
+            // فقط کلیدهای ضروری را حذف می‌کنیم (state و status و started و request و ...)
             await Promise.all([
               env.QUEUE.delete(`status:${chatId}`),
               env.QUEUE.delete(`request:${chatId}`),
@@ -344,6 +349,7 @@ export default {
           return new Response('OK');
         }
 
+        // پیام متنی
         if (update.message?.text) {
           const chatId = update.message.chat.id;
           const text = update.message.text.trim();
@@ -351,7 +357,6 @@ export default {
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
-              // فقط activeCount و queueList را ریست می‌کنیم (تعداد لینک‌های ملی و حجم کل دست نخورده باقی می‌ماند)
               await env.QUEUE.put('activeCount', 0);
               await env.QUEUE.put('queueList', JSON.stringify([]));
               statsCache.expires = 0;
@@ -400,128 +405,4 @@ export default {
               }
               const fileSize = await getFileSize(text);
               if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
-                await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
-                return new Response('OK');
-              }
-              await env.QUEUE.put(`state:${chatId}`, JSON.stringify({ step: 'awaiting_password', url: text, fileSize: fileSize || 0 }), { expirationTtl: 3600 });
-              const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
-              await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
-            } else {
-              await sendSimple(chatId, "❌ لینک معتبر نیست (با http:// یا https:// شروع شود).", TOKEN);
-            }
-            return new Response('OK');
-          }
-
-          const userState = JSON.parse(userStateRaw);
-          if (userState.step === 'awaiting_password') {
-            const password = text;
-            const fileUrl = userState.url;
-            const fileSize = userState.fileSize || 0;
-            await env.QUEUE.delete(`state:${chatId}`);
-            await env.QUEUE.put(`request:${chatId}`, JSON.stringify({ url: fileUrl, password, fileSize }));
-
-            let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
-            let queueList = await env.QUEUE.get('queueList', 'json') || [];
-
-            if (activeCount < MAX_CONCURRENT) {
-              await env.QUEUE.put('activeCount', activeCount + 1);
-              await env.QUEUE.put(`status:${chatId}`, 'processing');
-              this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
-              await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
-            } else {
-              queueList.push({ chatId, fileUrl, password, fileSize });
-              await env.QUEUE.put('queueList', JSON.stringify(queueList));
-              await env.QUEUE.put(`status:${chatId}`, 'waiting');
-              await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueList.length}`, TOKEN);
-            }
-            return new Response('OK');
-          }
-        }
-        return new Response('OK');
-      } catch (err) {
-        console.error(err);
-        return new Response('Error', { status: 500 });
-      }
-    }
-    return new Response('Bot is running');
-  },
-
-  async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
-    const userId = `${chatId}_${Date.now()}`;
-    let retry = 0;
-    let workflowSent = false;
-
-    while (retry <= MAX_RETRIES && !workflowSent) {
-      const sent = await this.sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN);
-      if (sent) {
-        workflowSent = true;
-        break;
-      }
-      retry++;
-      if (retry <= MAX_RETRIES) {
-        await sendSimple(chatId, `⚠️ تلاش ${retry} ناموفق بود. تلاش مجدد در ${RETRY_INTERVAL/1000} ثانیه...`, TOKEN);
-        await new Promise(r => setTimeout(r, RETRY_INTERVAL));
-      }
-    }
-    if (!workflowSent) {
-      await sendSimple(chatId, "❌ پس از تلاش، درخواست به گیت‌هاب ارسال نشد. لطفاً دوباره تلاش کنید.", TOKEN);
-      await this.finishTask(env);
-      return;
-    }
-
-    let started = false;
-    for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
-      await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
-      if (await env.QUEUE.get(`started:${chatId}`)) { started = true; break; }
-    }
-    if (!started) {
-      await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. لطفاً با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
-    }
-
-    let branch = null;
-    for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
-      await new Promise(r => setTimeout(r, WAIT_INTERVAL));
-      branch = await env.QUEUE.get(`branch:${chatId}`);
-      if (branch) break;
-    }
-    if (!branch) {
-      console.error(`Timeout waiting for branch for ${chatId}`);
-      await sendSimple(chatId, `❌ زمان انتظار برای پردازش فایل (${TASK_TIMEOUT/60000} دقیقه) به پایان رسید. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
-      await this.finishTask(env);
-    }
-  },
-
-  async sendWorkflowRequest(chatId, fileUrl, password, userId, env, TOKEN) {
-    const GITHUB_TOKEN = env.GH_TOKEN;
-    const GITHUB_OWNER = 'gptmoone';
-    const GITHUB_REPO = 'telegram-file-downloader';
-    try {
-      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `token ${GITHUB_TOKEN}`,
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'CloudflareWorkerBot/1.0'
-        },
-        body: JSON.stringify({ ref: 'main', inputs: { file_url: fileUrl, zip_password: password, user_id: userId } })
-      });
-      return res.ok;
-    } catch { return false; }
-  },
-
-  async finishTask(env) {
-    let activeCount = await env.QUEUE.get('activeCount', 'json') || 0;
-    if (activeCount > 0) activeCount--;
-    await env.QUEUE.put('activeCount', activeCount);
-    statsCache.expires = 0;
-
-    let queueList = await env.QUEUE.get('queueList', 'json') || [];
-    if (queueList.length > 0) {
-      const next = queueList.shift();
-      await env.QUEUE.put('queueList', JSON.stringify(queueList));
-      await env.QUEUE.put('activeCount', activeCount + 1);
-      await env.QUEUE.put(`status:${next.chatId}`, 'processing');
-      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
-    }
-  }
-};
+                await se
