@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی (رفع صف، اولویت Pro، finishing خودکار)
+// ربات دانلودر ملی - نسخه نهایی (رفع خطای 1101 و بهبود وضعیت من)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -317,31 +317,38 @@ export default {
       return new Response('OK');
     }
     if (path === '/api/complete' && request.method === 'POST') {
-      const { user_id, branch } = await request.json();
-      if (user_id && branch) {
-        const chatId = user_id.split('_')[0];
-        const isPro = await isProUser(env, chatId);
-        const ttlSeconds = isPro ? 3 * 24 * 60 * 60 : 3 * 60 * 60;
-        const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
-        await dbSetBranchForUser(env, chatId, branch, expiresAt);
-        await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
-        const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
-        let fileSizeBytes = 0, password = '';
-        if (reqRow && reqRow.request_data) {
-          const req = JSON.parse(reqRow.request_data);
-          fileSizeBytes = req.fileSize || 0;
-          password = req.password || '';
+      try {
+        const { user_id, branch } = await request.json();
+        if (user_id && branch) {
+          const chatId = user_id.split('_')[0];
+          const isPro = await isProUser(env, chatId);
+          const ttlSeconds = isPro ? 3 * 24 * 60 * 60 : 3 * 60 * 60;
+          const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+          await dbSetBranchForUser(env, chatId, branch, expiresAt);
+          await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
+          const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
+          let fileSizeBytes = 0, password = '';
+          if (reqRow && reqRow.request_data) {
+            const req = JSON.parse(reqRow.request_data);
+            fileSizeBytes = req.fileSize || 0;
+            password = req.password || '';
+          }
+          const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
+          await dbIncrementLinks(env, volumeGB);
+          const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
+          const validityMsg = isPro ? "۳ روز" : "۳ ساعت";
+          const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
+          await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
+          await dbDeleteUserState(env, chatId);
+          await this.finishTask(env);
+        } else {
+          console.error('Invalid complete payload:', { user_id, branch });
         }
-        const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
-        await dbIncrementLinks(env, volumeGB);
-        const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
-        const validityMsg = isPro ? "۳ روز" : "۳ ساعت";
-        const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
-        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
-        await dbDeleteUserState(env, chatId);
-        await this.finishTask(env);
+        return new Response('OK');
+      } catch (err) {
+        console.error('Error in /api/complete:', err);
+        return new Response('Error', { status: 500 });
       }
-      return new Response('OK');
     }
     if (path === '/api/failed' && request.method === 'POST') {
       const { user_id } = await request.json();
@@ -409,7 +416,21 @@ export default {
           }
           else if (data === 'status') {
             try {
+              // ابتدا وضعیت فعلی را از user_state بگیر
               const state = await dbGetUserState(env, chatId);
+              if (state && state.status === 'done' && state.branchName) {
+                const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${state.branchName}.zip`;
+                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: ${link}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» پاک کنید.`, TOKEN);
+                return;
+              }
+              // اگر در user_state 'done' نیست، شاید شاخه در active_branches باشد (در صورت عدم هماهنگی)
+              const lastBranch = await dbGetLastBranch(env, chatId);
+              if (lastBranch) {
+                const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${lastBranch}.zip`;
+                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: ${link}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» پاک کنید.`, TOKEN);
+                return;
+              }
+              // در غیر این صورت وضعیت عادی را نمایش بده
               if (!state) { await sendSimple(chatId, "📭 هیچ درخواست فعالی ندارید.", TOKEN); return; }
               let progress = '';
               if (state.totalChunks && state.uploadedChunks) {
@@ -428,8 +449,6 @@ export default {
                   pos = row?.pos || '?';
                 }
                 await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos}${isPro ? ' - اولویت Pro' : ''})`, TOKEN);
-              } else if (state.status === 'done') {
-                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${state.branchName}.zip`, TOKEN);
               } else if (state.status === 'awaiting_password') {
                 await sendSimple(chatId, "🔐 منتظر رمز عبور هستم. لطفاً رمز خود را ارسال کنید.", TOKEN);
               } else {
@@ -530,14 +549,8 @@ export default {
           if (text.startsWith('/startqueue')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
-              // ابتدا مطمئن شویم که activeCount درست است (اختیاری)
-              const activeCount = await dbGetActiveCount(env);
-              if (activeCount < MAX_CONCURRENT) {
-                await this.finishTask(env);
-                await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
-              } else {
-                await sendSimple(chatId, `⚠️ در حال حاضر ${activeCount} فایل در حال پردازش است. صف به صورت خودکار پس از اتمام هر فایل شروع می‌شود.`, TOKEN);
-              }
+              await this.finishTask(env);
+              await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
             }
@@ -692,7 +705,6 @@ export default {
   },
 
   async finishTask(env) {
-    // بلافاصله بعد از اتمام یک تسک، آیتم بعدی را از صف بردار
     const next = await dbPopQueue(env);
     if (next) {
       await dbSetUserState(env, next.chatId, 'processing', { url: next.fileUrl, password: next.password, fileSize: next.fileSize });
