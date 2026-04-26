@@ -29,13 +29,10 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
 
-      - name: Checkout (optimized)
+      - name: Checkout (full history, no sparse)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-          sparse-checkout: |
-            .github/workflows
-          sparse-checkout-cone-mode: false
+          fetch-depth: 0
 
       - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
@@ -77,7 +74,7 @@ jobs:
         run: |
           BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
-          git rm -rf --ignore-unmatch . 2>/dev/null || true
+          git rm -rf . 2>/dev/null || true
           echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
           chunks=(archive.7z.*)
           total=${#chunks[@]}
@@ -121,4 +118,4 @@ jobs:
         run: |
           curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
             -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
