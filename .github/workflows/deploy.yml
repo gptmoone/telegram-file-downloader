@@ -16,4 +16,4 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: deploy worker.js --name telegram-file-bot --compatibility-date 2026-04-24 --var TELEGRAM_TOKEN:${{ secrets.TELEGRAM_TOKEN }} GH_TOKEN:${{ secrets.GH_TOKEN }} NOWPAYMENTS_API_KEY:${{ secrets.NOWPAYMENTS_API_KEY }} NOWPAYMENTS_IPN_SECRET:${{ secrets.NOWPAYMENTS_IPN_SECRET }} PRO_PRICE:${{ secrets.PRO_PRICE }} ADMIN_SECRET:${{ secrets.ADMIN_SECRET }}
+          command: deploy worker.js --name telegram-file-bot --compatibility-date 2026-04-24 --var TELEGRAM_TOKEN:${{ secrets.TELEGRAM_TOKEN }} GH_TOKEN:${{ secrets.GH_TOKEN }} NOWPAYMENTS_API_KEY:${{ secrets.NOWPAYMENTS_API_KEY }} NOWPAYMENTS_IPN_SECRET:${{ secrets.NOWPAYMENTS_IPN_SECRET }} PRO_PRICE:${{ secrets.PRO_PRICE }} ADMIN_SECRET:${{ secrets.ADMIN_SECRET }} ADMIN_CHAT_ID:${{ secrets.ADMIN_CHAT_ID }}
