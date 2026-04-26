@@ -29,10 +29,11 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
 
-      - name: Checkout (full history, no sparse)
+      - name: Optimized Checkout (fast)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          filter: blob=none
 
       - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
@@ -70,7 +71,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"total_chunks\":${{ steps.chunks.outputs.total_chunks }}}"
 
-      - name: Create user branch
+      - name: Create user branch (keep only necessary files)
         run: |
           BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
           git checkout --orphan "$BRANCH_NAME"
