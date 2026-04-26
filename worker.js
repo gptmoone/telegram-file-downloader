@@ -530,8 +530,14 @@ export default {
           if (text.startsWith('/startqueue')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
-              await this.finishTask(env);
-              await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
+              // ابتدا مطمئن شویم که activeCount درست است (اختیاری)
+              const activeCount = await dbGetActiveCount(env);
+              if (activeCount < MAX_CONCURRENT) {
+                await this.finishTask(env);
+                await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
+              } else {
+                await sendSimple(chatId, `⚠️ در حال حاضر ${activeCount} فایل در حال پردازش است. صف به صورت خودکار پس از اتمام هر فایل شروع می‌شود.`, TOKEN);
+              }
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
             }
@@ -686,6 +692,7 @@ export default {
   },
 
   async finishTask(env) {
+    // بلافاصله بعد از اتمام یک تسک، آیتم بعدی را از صف بردار
     const next = await dbPopQueue(env);
     if (next) {
       await dbSetUserState(env, next.chatId, 'processing', { url: next.fileUrl, password: next.password, fileSize: next.fileSize });
