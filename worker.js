@@ -10,7 +10,7 @@ const MAIN_KEYBOARD = {
     [{ text: "❓ راهنما", callback_data: "help" }]
   ]
 };
-const MAX_CONCURRENT = 10;
+const MAX_CONCURRENT = 4;
 const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
 const START_WAIT_INTERVAL = 30000;
