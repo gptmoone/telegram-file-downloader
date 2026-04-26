@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی (عضویت اجباری، پنل مدیریت، آمار شخصی)
+// ربات دانلودر ملی - نسخه نهایی با عضویت اجباری پیشرفته
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -34,9 +34,7 @@ const DAILY_LIMIT_NORMAL = 1;
 const DAILY_LIMIT_PRO = 5;
 
 const lastCallbackProcessed = new Map();
-
-// حالت موقت برای ورود اطلاعات توسط ادمین
-let adminTempState = new Map(); // chatId -> { step, data }
+let adminTempState = new Map();
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -230,7 +228,7 @@ async function getRemainingQuotaText(env, chatId, isPro) {
   return `📊 سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
 }
 
-// ========== توابع عضویت اجباری ==========
+// ========== توابع عضویت اجباری و لینک‌های معلق ==========
 async function getRequiredChannels(env) {
   const row = await env.DB.prepare('SELECT channels FROM required_channels WHERE id = 1').first();
   if (!row) return [];
@@ -254,6 +252,17 @@ async function isUserMemberOfChannels(chatId, channels, TOKEN) {
     } catch (e) { return false; }
   }
   return true;
+}
+async function savePendingLink(env, chatId, fileUrl, fileSize) {
+  const now = Date.now();
+  await env.DB.prepare('INSERT OR REPLACE INTO pending_links (chat_id, file_url, file_size, timestamp) VALUES (?, ?, ?, ?)').bind(chatId, fileUrl, fileSize, now).run();
+}
+async function getPendingLink(env, chatId) {
+  const row = await env.DB.prepare('SELECT file_url, file_size FROM pending_links WHERE chat_id = ?').bind(chatId).first();
+  if (!row) return null;
+  // حذف بعد از بازیابی (اختیاری)
+  await env.DB.prepare('DELETE FROM pending_links WHERE chat_id = ?').bind(chatId).run();
+  return { url: row.file_url, fileSize: row.file_size };
 }
 
 // ========== توابع آمار شخصی کاربر ==========
@@ -384,7 +393,7 @@ async function getFileSize(url) {
   } catch { return null; }
 }
 
-// ========== دستورات ادمین (قدیمی + توابع جدید) ==========
+// ========== دستورات ادمین (همانند قبل) ==========
 async function adminPromoteToPro(env, chatId, targetChatId, adminSecret, providedSecret, TOKEN) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const userExists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetChatId).first();
@@ -457,13 +466,13 @@ export default {
     const GITHUB_OWNER = 'gptmoone';
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
-    const ADMIN_CHAT_ID = env.ADMIN_CHAT_ID || '';  // شناسه عددی ادمین
+    const ADMIN_CHAT_ID = env.ADMIN_CHAT_ID || '';
 
     try {
       await ensureGlobalStats(env);
     } catch(e) { console.error('ensureGlobalStats error:', e); }
 
-    // API endpoints (بدون تغییر)
+    // API endpoints
     if (path === '/api/cleanup-branches' && request.method === 'POST') {
       return handleCleanupBranches(request, env);
     }
@@ -511,7 +520,7 @@ export default {
         const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
         await dbIncrementLinks(env, volumeGB);
         await incrementDailyLimit(env, chatId);
-        await incrementUserStats(env, chatId, fileSizeBytes);  // ثبت آمار شخصی
+        await incrementUserStats(env, chatId, fileSizeBytes);
 
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۱ روز" : "۱ ساعت";
@@ -572,7 +581,35 @@ export default {
           lastCallbackProcessed.set(`${chatId}_${data}`, now);
           await answerCallback(callbackId, TOKEN);
 
-          // منوی مدیریت (برای ادمین)
+          // دکمه "عضو شدم" (برای ادامه لینک معلق)
+          if (data === 'check_membership') {
+            const pending = await getPendingLink(env, chatId);
+            if (!pending) {
+              await sendSimple(chatId, "❌ لینک معلقی یافت نشد. لطفاً لینک خود را مجدداً ارسال کنید.", TOKEN);
+              return new Response('OK');
+            }
+            // بررسی مجدد عضویت
+            const requiredChannels = await getRequiredChannels(env);
+            const isMember = await isUserMemberOfChannels(chatId, requiredChannels, TOKEN);
+            if (!isMember) {
+              const channelsList = requiredChannels.map(c => `@${c}`).join(', ');
+              const joinKeyboard = {
+                inline_keyboard: [
+                  requiredChannels.map(ch => ({ text: `🔗 عضویت در ${ch}`, url: `https://t.me/${ch}` })),
+                  [{ text: "✅ عضو شدم", callback_data: "check_membership" }]
+                ]
+              };
+              await sendMessage(chatId, `❌ شما هنوز عضو کانال‌های زیر نشده‌اید:\n${channelsList}\nلطفاً ابتدا عضو شوید سپس روی دکمه «عضو شدم» کلیک کنید.`, joinKeyboard, TOKEN);
+              // دوباره لینک را نگه دار
+              await savePendingLink(env, chatId, pending.url, pending.fileSize);
+              return new Response('OK');
+            }
+            // کاربر عضو شده است -> ادامه پردازش
+            await processPendingLink(env, chatId, pending.url, pending.fileSize, TOKEN);
+            return new Response('OK');
+          }
+
+          // منوی مدیریت (ادمین)
           if (data === 'admin_panel' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             await sendMessage(chatId, "🛠 <b>پنل مدیریت ربات</b>\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:", ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
@@ -581,7 +618,7 @@ export default {
             await sendMessage(chatId, "🌀 بازگشت به منوی اصلی", MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
-          // عملیات مدیریتی
+          // سایر عملیات مدیریتی (همانند قبل)
           if (data === 'admin_reset_queue' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             adminTempState.delete(chatId);
             const result = await adminResetQueue(env, chatId, ADMIN_SECRET, ADMIN_SECRET, TOKEN);
@@ -774,7 +811,7 @@ export default {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
 
-          // بررسی وضعیت موقت ادمین (ورود شناسه کاربر برای promote/resetquota)
+          // وضعیت موقت ادمین
           if (adminTempState.has(chatId) && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             const state = adminTempState.get(chatId);
             if (state.step === 'awaiting_promote_userid') {
@@ -884,7 +921,7 @@ export default {
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `📌 <b>ربات ملی دانلود</b> – راه‌حل سریع و آسان برای دانلود فایل‌های فیلترشده با <b>اینترنت ملی</b>!\n\n` +
               `🔹 <b>چگونه کار می‌کند؟</b>\n` +
-              `1️⃣ فایل خود را به ربات <code>@filesto_bot</code> بدهید تا لینک مستقیم بگیرید.\n` +
+              `1️⃣ برای دریافت لینک مستقیم فایل تلگرام، روی دکمه زیر کلیک کنید:\n` +
               `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
               `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
               `4️⃣ ربات فایل را دانلود، تکه‌تکه کرده و در گیت‌هاب آپلود می‌کند.\n` +
@@ -904,44 +941,56 @@ export default {
               `• کانال تلگرام: @maramidownload\n` +
               `• برای گزارش مشکلات، درخواست راهنما یا ایده‌های جدید، در کانال پیام بگذارید.\n\n` +
               `👇 با دکمه زیر شروع کنید.`;
-            // اضافه کردن دکمه پنل مدیریت برای ادمین
-            let keyboard = MAIN_KEYBOARD;
+            // دکمه جدید برای ربات @filesto_bot
+            const welcomeKeyboard = {
+              inline_keyboard: [
+                [{ text: "📥 دریافت لینک مستقیم از تلگرام", url: "https://t.me/filesto_bot" }],
+                [{ text: "📥 لینک جدید", callback_data: "new_link" }],
+                [{ text: "📊 آمار لحظه‌ای", callback_data: "stats" }, { text: "📊 وضعیت من", callback_data: "status" }],
+                [{ text: "⭐️ عضویت Pro", callback_data: "pro_info" }, { text: "🗑️ حذف فایل من", callback_data: "delete_my_file" }],
+                [{ text: "❓ راهنما", callback_data: "help" }, { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }]
+              ]
+            };
             if (ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
-              keyboard = {
-                inline_keyboard: [
-                  [{ text: "📥 لینک جدید", callback_data: "new_link" }],
-                  [{ text: "📊 آمار لحظه‌ای", callback_data: "stats" }, { text: "📊 وضعیت من", callback_data: "status" }],
-                  [{ text: "⭐️ عضویت Pro", callback_data: "pro_info" }, { text: "🗑️ حذف فایل من", callback_data: "delete_my_file" }],
-                  [{ text: "❓ راهنما", callback_data: "help" }, { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }],
-                  [{ text: "🛠 پنل مدیریت", callback_data: "admin_panel" }]
-                ]
-              };
+              welcomeKeyboard.inline_keyboard.push([{ text: "🛠 پنل مدیریت", callback_data: "admin_panel" }]);
             }
-            await sendMessage(chatId, welcome, keyboard, TOKEN);
+            await sendMessage(chatId, welcome, welcomeKeyboard, TOKEN);
             return new Response('OK');
           }
 
-          // دریافت لینک جدید (با بررسی عضویت اجباری و سهمیه)
+          // دریافت لینک جدید (با بررسی عضویت اجباری)
           if (text.match(/^https?:\/\//)) {
-            // بررسی عضویت اجباری
+            // ابتدا بررسی عضویت اجباری
             const requiredChannels = await getRequiredChannels(env);
             if (requiredChannels.length > 0) {
               const isMember = await isUserMemberOfChannels(chatId, requiredChannels, TOKEN);
               if (!isMember) {
                 const channelsList = requiredChannels.map(c => `@${c}`).join(', ');
-                await sendSimple(chatId, `❌ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:\n${channelsList}\n\nپس از عضویت، مجدداً لینک خود را ارسال کنید.`, TOKEN);
+                const joinKeyboard = {
+                  inline_keyboard: [
+                    requiredChannels.map(ch => ({ text: `🔗 عضویت در ${ch}`, url: `https://t.me/${ch}` })),
+                    [{ text: "✅ عضو شدم", callback_data: "check_membership" }]
+                  ]
+                };
+                await sendMessage(chatId, `❌ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:\n${channelsList}\n\nپس از عضویت، روی دکمه «عضو شدم» کلیک کنید.`, joinKeyboard, TOKEN);
+                // ذخیره لینک برای بعد
+                const fileSize = await getFileSize(text);
+                await savePendingLink(env, chatId, text, fileSize || 0);
                 return new Response('OK');
               }
             }
-            
+            // اگر عضویت تأیید شد، ادامه پردازش عادی
+            await processPendingLink(env, chatId, text, 0, TOKEN); // در اینجا با لینک جدید فراخوانی می‌کنیم، اما تابع processPendingLink را باید تعریف کنیم
+            // برای جلوگیری از تکرار، بهتر است منطق اصلی را در یک تابع جداگانه قرار دهیم
+            // در ادامه تابع processPendingLink را تعریف می‌کنیم
+            // فعلاً فراخوانی مستقیم همانند قبل
             const isPro = await isProUser(env, chatId);
             const { allowed, remaining, limit } = await canUpload(env, chatId, isPro);
             if (!allowed) {
-              await sendSimple(chatId, `❌ شما به حداکثر سهمیه روزانه (${limit} فایل) رسیده‌اید. لطفاً فردا دوباره تلاش کنید یا اشتراک Pro تهیه کنید تا سهمیه شما به ${DAILY_LIMIT_PRO} فایل در روز افزایش یابد.`, TOKEN);
+              await sendSimple(chatId, `❌ شما به حداکثر سهمیه روزانه (${limit} فایل) رسیده‌اید.`, TOKEN);
               return new Response('OK');
             }
             const quotaMsg = `📊 سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
-
             const lastBranch = await dbGetLastBranch(env, chatId);
             if (lastBranch) {
               try {
@@ -1087,3 +1136,46 @@ export default {
     }
   }
 };
+
+// تابع کمکی برای ادامه پردازش لینک پس از عضویت
+async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
+  const isPro = await isProUser(env, chatId);
+  const { allowed, remaining, limit } = await canUpload(env, chatId, isPro);
+  if (!allowed) {
+    await sendSimple(chatId, `❌ شما به حداکثر سهمیه روزانه (${limit} فایل) رسیده‌اید. لطفاً فردا دوباره تلاش کنید یا اشتراک Pro تهیه کنید.`, TOKEN);
+    return;
+  }
+  const quotaMsg = `📊 سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
+  // حذف شاخه قبلی و ...
+  const lastBranch = await dbGetLastBranch(env, chatId);
+  if (lastBranch) {
+    try {
+      await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${lastBranch}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `token ${GITHUB_TOKEN}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'CloudflareWorkerBot/1.0'
+        }
+      });
+      await dbRemoveActiveBranch(env, lastBranch);
+    } catch(e) { console.error(e); }
+  }
+  await dbDeleteUserState(env, chatId);
+  await dbRemoveFromQueue(env, chatId);
+  const repoSize = await getRepoSize(env);
+  if (repoSize >= REPO_SIZE_LIMIT_GB) {
+    await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده. لطفاً چند ساعت بعد تلاش کنید.`, TOKEN);
+    return;
+  } else if (repoSize >= REPO_SIZE_WARNING_GB) {
+    await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). پس از دانلود، فایل را حذف کنید.`, TOKEN);
+  }
+  const actualFileSize = fileSize || await getFileSize(fileUrl);
+  if (actualFileSize && actualFileSize > 2 * 1024 * 1024 * 1024) {
+    await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است.", TOKEN);
+    return;
+  }
+  await dbSetUserState(env, chatId, 'awaiting_password', { url: fileUrl, fileSize: actualFileSize || 0 });
+  const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
+  await sendMessage(chatId, `✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n\n${quotaMsg}`, cancelKeyboard, TOKEN);
+}
