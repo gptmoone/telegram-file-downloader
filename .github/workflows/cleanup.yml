@@ -1,0 +1,22 @@
+name: Clean expired branches
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Delete expired branches using Worker API
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/cleanup-branches" \
+            -H "Content-Type: application/json" \
+            -d "{\"secret\":\"${{ secrets.ADMIN_SECRET }}\"}"
