@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی با Pro و Cron پاکسازی خودکار
+// ربات دانلودر ملی - نسخه نهایی با رفع مشکلات صف و حذف تکراری
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -21,7 +21,9 @@ const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 
-// ---------- توابع کمکی ----------
+// کش برای جلوگیری از پردازش مجدد دکمه در کمتر از 3 ثانیه
+const lastCallbackProcessed = new Map();
+
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
   const body = {
@@ -71,7 +73,7 @@ async function getRepoSize(env) {
   return 0;
 }
 
-// ---------- توابع D1 ----------
+// ========== توابع D1 ==========
 async function ensureGlobalStats(env) {
   const row = await env.DB.prepare('SELECT id FROM global_stats WHERE id = 1').first();
   if (!row) {
@@ -111,7 +113,7 @@ async function dbDeleteUserState(env, chatId) {
 async function dbGetQueueCount(env, onlyPro = false) {
   let sql = 'SELECT COUNT(*) as count FROM queue';
   if (onlyPro) sql += ' WHERE priority = 1';
-  else if (onlyPro === false) sql += ' WHERE priority = 0';
+  else if (onlyPro === false && onlyPro !== undefined) sql += ' WHERE priority = 0'; // اگر false داده شده باشد
   const row = await env.DB.prepare(sql).first();
   return row?.count || 0;
 }
@@ -172,7 +174,7 @@ async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
   await env.DB.prepare('UPDATE user_state SET branch_name = ? WHERE chat_id = ?').bind(branchName, chatId).run();
 }
 
-// ---------- توابع اشتراک Pro و NowPayments ----------
+// ========== توابع Pro و NowPayments ==========
 async function isProUser(env, chatId) {
   const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
@@ -180,17 +182,13 @@ async function isProUser(env, chatId) {
 }
 async function activateProSubscription(env, chatId, orderId, amountUSD) {
   const now = Math.floor(Date.now() / 1000);
-  const expiresAt = now + (30 * 24 * 60 * 60); // 30 روز
+  const expiresAt = now + (30 * 24 * 60 * 60);
   await env.DB.prepare(`
     INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at)
     VALUES (?, ?, ?, ?)
   `).bind(chatId, expiresAt, orderId, now).run();
   await sendSimple(chatId, 
-    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n` +
-    `💎 مبلغ پرداختی: ${amountUSD} USD\n` +
-    `📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n` +
-    `🎁 مزایا:\n• فایل‌های شما تا ۳ روز روی سرور می‌ماند (عادی ۳ ساعت)\n• اولویت بالاتر در صف پردازش\n\n` +
-    `از اعتماد شما سپاسگزاریم! 🚀`, 
+    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountUSD} USD\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۳ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
     env.TELEGRAM_TOKEN
   );
 }
@@ -239,19 +237,15 @@ async function handleNowPaymentsWebhook(request, env) {
   }
 }
 
-// ---------- تابع پاکسازی خودکار (Cron) ----------
+// ========== تابع پاکسازی خودکار (Cron) ==========
 async function cleanupExpiredBranches(env) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
   const GITHUB_REPO = 'telegram-file-downloader';
   const now = Math.floor(Date.now() / 1000);
-  
-  // 1. دریافت لیست شاخه‌های منقضی از جدول active_branches
   const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
-  
   for (const branch of expired.results) {
     try {
-      // حذف شاخه از ریموت گیت‌هاب
       const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branch.branch_name}`, {
         method: 'DELETE',
         headers: {
@@ -260,27 +254,16 @@ async function cleanupExpiredBranches(env) {
           'User-Agent': 'CloudflareWorkerBot/1.0'
         }
       });
-      if (res.ok) {
-        // حذف رکورد از active_branches
+      if (res.ok || res.status === 404) {
         await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
         console.log(`✅ Deleted expired branch: ${branch.branch_name}`);
-      } else if (res.status === 404) {
-        // شاخه وجود ندارد، فقط از دیتابیس حذف کن
-        await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
-        console.log(`⚠️ Branch ${branch.branch_name} not found on GitHub, removed from DB`);
       } else {
         console.error(`Failed to delete ${branch.branch_name}: ${res.status}`);
       }
-    } catch (err) {
-      console.error(`Error deleting branch ${branch.branch_name}:`, err);
-    }
+    } catch (err) { console.error(err); }
   }
-  
-  // 2. پاکسازی رکوردهای قدیمی user_state (بیش از 1 روز و وضعیت done)
   await env.DB.prepare('DELETE FROM user_state WHERE status = ? AND started_at <= ?').bind('done', now - 86400).run();
-  // 3. پاکسازی صف‌های قدیمی (بیش از 2 روز)
   await env.DB.prepare('DELETE FROM queue WHERE enqueued_at <= ?').bind(now * 1000 - 172800000).run();
-  
   return { deleted: expired.results.length };
 }
 
@@ -302,18 +285,20 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
-    // ---------- Cron Trigger (پاکسازی خودکار) ----------
+    try { await ensureGlobalStats(env); } catch(e) { console.error(e); }
+
+    // Cron trigger
     if (path === '/__cron' && request.method === 'GET') {
       const result = await cleanupExpiredBranches(env);
       return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
 
-    // ---------- Webhook NowPayments ----------
+    // Webhook NowPayments
     if (path === '/api/nowpayments-webhook' && request.method === 'POST') {
       return handleNowPaymentsWebhook(request, env);
     }
 
-    // ---------- API endpoints قدیمی ----------
+    // API endpoints (بدون تغییر)
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -353,7 +338,7 @@ export default {
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۳ روز" : "۳ ساعت";
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
-        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبור: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
+        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
         await dbDeleteUserState(env, chatId);
         await this.finishTask(env);
       }
@@ -379,42 +364,36 @@ export default {
       return new Response('OK');
     }
 
-    // ---------- وب‌هوک اصلی تلگرام ----------
+    // ========== وب‌هوک اصلی تلگرام ==========
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
-        // دکمه‌ها
+        // ========== دکمه‌ها ==========
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
           const data = cb.data;
-          await answerCallback(cb.id, TOKEN);
+          const callbackId = cb.id;
+          
+          // جلوگیری از پردازش مجدد یک دکمه در کمتر از 3 ثانیه
+          const now = Date.now();
+          const lastTime = lastCallbackProcessed.get(`${chatId}_${data}`) || 0;
+          if (now - lastTime < 3000) {
+            return new Response('OK');
+          }
+          lastCallbackProcessed.set(`${chatId}_${data}`, now);
+          
+          await answerCallback(callbackId, TOKEN);
 
           if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
               `این ربات لینک مستقیم را به لینک قابل دانلود در اینترنت ملی تبدیل می‌کند.\n\n` +
-              `🔹 <b>نحوه استفاده:</b>\n` +
-              `1️⃣ فایل خود را به @filesto_bot بدهید تا لینک مستقیم بگیرید.\n` +
-              `2️⃣ لینک را در همین ربات ارسال کنید (درخواست قبلی خودکار لغو می‌شود).\n` +
-              `3️⃣ رمز عبور دلخواه وارد کنید.\n` +
-              `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n` +
-              `5️⃣ پس از دانلود، روی دکمه «حذف فایل من» کلیک کنید.\n\n` +
-              `⭐️ <b>عضویت Pro</b>\n` +
-              `• با فعال‌سازی اشتراک Pro، فایل‌های شما به مدت ۳ روز روی سرور می‌مانند (معمولی ۳ ساعت).\n` +
-              `• در صف اولویت بالاتر دارید و سریع‌تر پردازش می‌شوید.\n` +
-              `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
-              `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
-              `🔹 <b>نحوه استخراج:</b>\n` +
-              `فایل ZIP را با 7-Zip یا WinRAR باز کنید. فایل archive.7z.001 را استخراج کنید.\n\n` +
-              `⚠️ <b>توجه:</b>\n` +
-              `• مخزن عمومی است، فایل شخصی نفرستید.\n` +
-              `• لینک دانلود برای کاربران معمولی ۳ ساعت و برای کاربران Pro ۳ روز معتبر است.\n` +
-              `• حجم فایل حداکثر ۲ گیگابایت.\n` +
-              `• از ارسال محتوای غیرمجاز خودداری کنید.\n\n` +
-              `❤️ حمایت: @maramivpn`;
+              `🔹 نحوه استفاده:\n1️⃣ فایل خود را به @filesto_bot بدهید تا لینک مستقیم بگیرید.\n2️⃣ لینک را در همین ربات ارسال کنید.\n3️⃣ رمز عبور دلخواه وارد کنید.\n4️⃣ منتظر پردازش شوید (لینک خودکار ارسال می‌شود).\n5️⃣ پس از دانلود، روی دکمه «حذف فایل من» کلیک کنید.\n\n` +
+              `⭐️ عضویت Pro:\n• فایل‌های شما تا ۳ روز روی سرور می‌ماند (عادی ۳ ساعت)\n• اولویت بالاتر در صف پردازش\n• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n\n` +
+              `⚠️ توجه امنیتی:\nمخزن عمومی است، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n❤️ حمایت: @maramivpn`;
             await sendSimple(chatId, helpText, TOKEN);
           }
           else if (data === 'stats') {
@@ -425,23 +404,20 @@ export default {
               const proQueueCount = await dbGetQueueCount(env, true);
               const totalBranches = await dbGetActiveBranchesCount(env);
               const totalUsers = await dbGetUsersCount(env);
-              const now = Math.floor(Date.now() / 1000);
-              const proUsersCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM pro_users WHERE expires_at > ?').bind(now).first()).count;
+              const nowUnix = Math.floor(Date.now() / 1000);
+              const proUsersCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM pro_users WHERE expires_at > ?').bind(nowUnix).first()).count;
               const repoSize = await getRepoSize(env);
               const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
               let warningMsg = '';
-              if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن پر است. لطفاً فایل‌های خود را حذف کنید.</b>';
-              else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
+              if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ هشدار: حجم مخزن پر است. لطفاً فایل‌های خود را حذف کنید.';
+              else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.';
               await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n⭐️ کاربران Pro فعال: ${proUsersCount}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount} (${proQueueCount} پرو)\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
-            } catch (err) { console.error('Stats error:', err); await sendSimple(chatId, "⚠️ خطا در دریافت آمار. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN); }
+            } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در دریافت آمار. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN); }
           }
           else if (data === 'status') {
             try {
               const state = await dbGetUserState(env, chatId);
-              if (!state) {
-                await sendSimple(chatId, "📭 هیچ درخواست فعالی ندارید.", TOKEN);
-                return;
-              }
+              if (!state) { await sendSimple(chatId, "📭 هیچ درخواست فعالی ندارید.", TOKEN); return; }
               let progress = '';
               if (state.totalChunks && state.uploadedChunks) {
                 const percent = Math.round(state.uploadedChunks / state.totalChunks * 100);
@@ -467,7 +443,7 @@ export default {
               } else {
                 await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
               }
-            } catch (err) { console.error('Status error:', err); await sendSimple(chatId, "⚠️ خطا در دریافت وضعیت. لطفاً بعداً تلاش کنید.", TOKEN); }
+            } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در دریافت وضعیت. لطفاً بعداً تلاش کنید.", TOKEN); }
           }
           else if (data === 'delete_my_file') {
             try {
@@ -484,13 +460,13 @@ export default {
                   'User-Agent': 'CloudflareWorkerBot/1.0'
                 }
               });
-              if (res.ok) {
+              if (res.ok || res.status === 404) {
                 await dbRemoveActiveBranch(env, lastBranch);
                 await sendSimple(chatId, "✅ فایل شما از سرور حذف شد. سپاس از همکاری شما.", TOKEN);
               } else {
-                await sendSimple(chatId, "❌ فایل قبلاً حذف شده یا یافت نشد.", TOKEN);
+                await sendSimple(chatId, "❌ خطا در حذف فایل. لطفاً بعداً تلاش کنید.", TOKEN);
               }
-            } catch (err) { console.error('Delete error:', err); await sendSimple(chatId, "⚠️ خطا در حذف فایل. لطفاً بعداً تلاش کنید.", TOKEN); }
+            } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در حذف فایل. لطفاً بعداً تلاش کنید.", TOKEN); }
           }
           else if (data === 'new_link') {
             await dbDeleteUserState(env, chatId);
@@ -516,7 +492,7 @@ export default {
             if (isPro) {
               const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ?').bind(chatId).first();
               const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
-              await sendSimple(chatId, `⭐️ وضعیت اشتراک **Pro** شما\n\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n💡 برای تمدید، مجدداً روی دکمه Pro کلیک کنید.`, TOKEN);
+              await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n💡 برای تمدید، مجدداً روی دکمه Pro کلیک کنید.`, TOKEN);
             } else {
               const amountUSD = parseFloat(env.PRO_PRICE) || 5;
               const invoice = await createNowPaymentsInvoice(env, chatId, amountUSD);
@@ -530,36 +506,59 @@ export default {
                 await sendMessage(chatId, 
                   `⭐️ <b>عضویت ویژه (Pro)</b>\n\n` +
                   `با فعال‌سازی اشتراک Pro از مزایای زیر بهره‌مند شوید:\n` +
-                  `• 🔥 فایل‌های شما تا <b>۳ روز</b> روی سرور می‌ماند (معمولی ۳ ساعت)\n` +
-                  `• 🚀 اولویت بالاتر در صف پردازش (پروها زودتر از عادی پردازش می‌شوند)\n` +
+                  `• 🔥 فایل‌های شما تا <b>۳ روز</b> روی سرور می‌ماند\n` +
+                  `• 🚀 اولویت بالاتر در صف پردازش\n` +
                   `• 💖 پشتیبانی ویژه\n\n` +
                   `💰 هزینه اشتراک یک ماهه: <b>${amountUSD} دلار</b> (معادل حدود ${(amountUSD/5).toFixed(2)} TON)\n\n` +
-                  `⚠️ پس از پرداخت، اشتراک شما به طور <b>خودکار</b> فعال می‌شود.`,
+                  `⚠️ پس از پرداخت، اشتراک شما به طور خودکار فعال می‌شود.`,
                   proKeyboard, TOKEN);
-              } else {
-                await sendSimple(chatId, `❌ خطا در ایجاد فاکتور پرداخت. لطفاً بعداً تلاش کنید.`, TOKEN);
-              }
+              } else { await sendSimple(chatId, `❌ خطا در ایجاد فاکتور پرداخت. لطفاً بعداً تلاش کنید.`, TOKEN); }
             }
           }
           return new Response('OK');
         }
 
-        // ---------- پیام متنی ----------
+        // ========== پیام متنی ==========
         if (update.message?.text) {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
+          
+          // دستور /resetstats (ریست کامل صف و پردازش‌ها)
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
               await env.DB.prepare('DELETE FROM queue').run();
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'waiting').run();
-              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد.", TOKEN);
-            } else {
-              await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
-            }
+              await this.finishTask(env);
+              await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد. صف در حال پردازش است.", TOKEN);
+            } else { await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN); }
             return new Response('OK');
           }
+          
+          // دستور /fixactive (فقط لغو processingهای گیر کرده و شروع صف)
+          if (text === '/fixactive') {
+            const secret = text.split(' ')[1];
+            if (ADMIN_SECRET && secret === ADMIN_SECRET) {
+              const processingUsers = await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first();
+              const count = processingUsers?.count || 0;
+              await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
+              await this.finishTask(env);
+              await sendSimple(chatId, `✅ ${count} رکورد پردازش گیر کرده لغو شد. صف در حال پردازش است.`, TOKEN);
+            } else { await sendSimple(chatId, "❌ دسترسی غیرمجاز. توکن اشتباه است.", TOKEN); }
+            return new Response('OK');
+          }
+          
+          // دستور /startqueue (فقط شروع صف بدون تغییر در پردازش‌ها)
+          if (text === '/startqueue') {
+            const secret = text.split(' ')[1];
+            if (ADMIN_SECRET && secret === ADMIN_SECRET) {
+              await this.finishTask(env);
+              await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
+            } else { await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN); }
+            return new Response('OK');
+          }
+          
           if (text === '/start') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
