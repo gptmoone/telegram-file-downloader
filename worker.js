@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی (رفع خطای 500 و ارسال لینک)
+// ربات دانلودر ملی - نسخه نهایی (رفع پاکسازی خودکار، متن کامل خوش‌آمدگویی)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -74,7 +74,7 @@ async function getRepoSize(env) {
   return 0;
 }
 
-// ========== توابع D1 با لاگ ==========
+// ========== توابع D1 ==========
 async function ensureGlobalStats(env) {
   const row = await env.DB.prepare('SELECT id FROM global_stats WHERE id = 1').first();
   if (!row) {
@@ -243,34 +243,40 @@ async function handleNowPaymentsWebhook(request, env) {
   }
 }
 
-// ========== تابع پاکسازی خودکار (Cron) ==========
-async function cleanupExpiredBranches(env) {
-  const GITHUB_TOKEN = env.GH_TOKEN;
-  const GITHUB_OWNER = 'gptmoone';
-  const GITHUB_REPO = 'telegram-file-downloader';
-  const now = Math.floor(Date.now() / 1000);
-  const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
-  for (const branch of expired.results) {
-    try {
-      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branch.branch_name}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `token ${GITHUB_TOKEN}`,
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'CloudflareWorkerBot/1.0'
+// ========== endpoint پاکسازی برنچ‌های منقضی (برای فراخوانی از GitHub Actions) ==========
+async function handleCleanupBranches(request, env) {
+  try {
+    const { secret } = await request.json();
+    if (secret !== env.ADMIN_SECRET) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+    const GITHUB_TOKEN = env.GH_TOKEN;
+    const GITHUB_OWNER = 'gptmoone';
+    const GITHUB_REPO = 'telegram-file-downloader';
+    const now = Math.floor(Date.now() / 1000);
+    const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
+    let deleted = 0;
+    for (const branch of expired.results) {
+      try {
+        const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branch.branch_name}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `token ${GITHUB_TOKEN}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'CloudflareWorkerBot/1.0'
+          }
+        });
+        if (res.ok || res.status === 404) {
+          await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
+          deleted++;
         }
-      });
-      if (res.ok || res.status === 404) {
-        await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
-        console.log(`✅ Deleted expired branch: ${branch.branch_name}`);
-      } else {
-        console.error(`Failed to delete ${branch.branch_name}: ${res.status}`);
-      }
-    } catch (err) { console.error(err); }
+      } catch (err) { console.error(err); }
+    }
+    return new Response(JSON.stringify({ deleted }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  } catch (err) {
+    console.error('Cleanup error:', err);
+    return new Response('Error', { status: 500 });
   }
-  await env.DB.prepare('DELETE FROM user_state WHERE status = ? AND started_at <= ?').bind('done', now - 86400).run();
-  await env.DB.prepare('DELETE FROM queue WHERE enqueued_at <= ?').bind(now * 1000 - 172800000).run();
-  return { deleted: expired.results.length };
 }
 
 async function getFileSize(url) {
@@ -295,18 +301,10 @@ export default {
       await ensureGlobalStats(env);
     } catch(e) { console.error('ensureGlobalStats error:', e); }
 
-    // Cron trigger
-    if (path === '/__cron' && request.method === 'GET') {
-      const result = await cleanupExpiredBranches(env);
-      return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    // ========== API endpoints ==========
+    if (path === '/api/cleanup-branches' && request.method === 'POST') {
+      return handleCleanupBranches(request, env);
     }
-
-    // Webhook NowPayments
-    if (path === '/api/nowpayments-webhook' && request.method === 'POST') {
-      return handleNowPaymentsWebhook(request, env);
-    }
-
-    // API endpoints
     if (path === '/api/started' && request.method === 'POST') {
       try {
         const { user_id } = await request.json();
@@ -341,12 +339,9 @@ export default {
         const ttl = isPro ? TTL_PRO : TTL_NORMAL;
         const expiresAt = Math.floor(Date.now() / 1000) + ttl;
 
-        // ذخیره شاخه در active_branches
         await dbSetBranchForUser(env, chatId, branch, expiresAt);
-        // به‌روزرسانی user_state
         await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
 
-        // دریافت رمز عبور و حجم فایل از request_data قبلی
         const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
         let fileSizeBytes = 0, password = '';
         if (reqRow && reqRow.request_data) {
@@ -355,24 +350,19 @@ export default {
           password = req.password || '';
         }
 
-        // به‌روزرسانی آمار کلی
         const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
         await dbIncrementLinks(env, volumeGB);
 
-        // ارسال پیام موفقیت به کاربر
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۱ روز" : "۱ ساعت";
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
 
-        // پاک کردن user_state فعلی
         await dbDeleteUserState(env, chatId);
-        // شروع تسک بعدی از صف
         await this.finishTask(env);
         return new Response('OK');
       } catch (err) {
         console.error('Error in /api/complete:', err);
-        // حتی در صورت خطا، سعی کنیم تسک بعدی را شروع کنیم و پاسخ OK بدهیم
         await this.finishTask(env).catch(e => console.error('finishTask error:', e));
         return new Response('OK');
       }
@@ -422,10 +412,32 @@ export default {
 
           if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
-              `این ربات لینک مستقیم را به لینک قابل دانلود در اینترنت ملی تبدیل می‌کند.\n\n` +
-              `🔹 نحوه استفاده:\n1️⃣ فایل خود را به @filesto_bot بدهید تا لینک مستقیم بگیرید.\n2️⃣ لینک را ارسال کنید.\n3️⃣ رمز عبور دلخواه وارد کنید.\n4️⃣ منتظر پردازش شوید.\n5️⃣ پس از دانلود، روی دکمه «حذف فایل من» کلیک کنید.\n\n` +
-              `⭐️ عضویت Pro: فایل‌های شما تا ۱ روز می‌ماند (عادی ۱ ساعت)، اولویت بالاتر در صف.\nهزینه: ${env.PRO_PRICE || 5} USD.\n\n` +
-              `⚠️ مخزن عمومی است، فایل شخصی نفرستید.\n❤️ حمایت: @maramivpn`;
+              `این ربات لینک مستقیم فایل شما را به لینک قابل دانلود در <b>اینترنت ملی</b> تبدیل می‌کند.\n\n` +
+              `🔹 <b>نحوه استفاده:</b>\n` +
+              `1️⃣ اگر لینک مستقیم ندارید، فایل خود را به ربات <code>@filesto_bot</code> فوروارد کنید.\n` +
+              `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
+              `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
+              `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n` +
+              `5️⃣ پس از دانلود، روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n\n` +
+              `⭐️ <b>عضویت Pro</b>\n` +
+              `• فایل‌های شما تا <b>۱ روز</b> روی سرور می‌ماند (عادی ۱ ساعت)\n` +
+              `• اولویت بالاتر در صف پردازش\n` +
+              `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
+              `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
+              `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
+              `• فایل ZIP دانلود شده را با <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
+              `• داخل پوشه استخراج شده، فایل‌هایی با پسوند <code>.001</code>، <code>.002</code> و ... می‌بینید.\n` +
+              `• روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه <b>Extract Here</b> (یا استخراج در اینجا) را انتخاب کنید.\n` +
+              `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.\n\n` +
+              `⚠️ <b>توجه امنیتی:</b>\n` +
+              `• فایل‌ها در یک مخزن <b>عمومی</b> گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
+              `• لینک دانلود برای کاربران عادی <b>۱ ساعت</b> و برای کاربران Pro <b>۱ روز</b> معتبر است.\n` +
+              `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n` +
+              `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
+              `❤️ <b>حمایت و پشتیبانی:</b>\n` +
+              `• کانال تلگرام: @maramidownload\n` +
+              `• عضو شوید تا از آخرین به‌روزرسانی‌ها و تخفیف‌های ویژه مطلع گردید.\n\n` +
+              `📢 ما را به دوستان خود معرفی کنید.`;
             await sendSimple(chatId, helpText, TOKEN);
           }
           else if (data === 'stats') {
@@ -442,12 +454,11 @@ export default {
               let warningMsg = '';
               if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ هشدار: حجم مخزن پر است. لطفاً فایل‌های خود را حذف کنید.';
               else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.';
-              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n⭐️ کاربران Pro فعال: ${proUsersCount}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount} (${proQueueCount} پرو)\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
+              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n⭐️ کاربران Pro فعال: ${proUsersCount}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount} (${proQueueCount} پرو)\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramidownload`, TOKEN);
             } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در دریافت آمار.", TOKEN); }
           }
           else if (data === 'status') {
             try {
-              // ابتدا از active_branches لینک آماده را نشان بده
               const lastBranch = await dbGetLastBranch(env, chatId);
               if (lastBranch) {
                 const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${lastBranch}.zip`;
@@ -594,7 +605,28 @@ export default {
           if (text === '/start') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
-            const welcome = `🌀 به ربات دانلودر خوش آمدید 🌀\n\nلینک مستقیم فایل را بفرستید.\n🔹 لینک مستقیم تلگرام: @filesto_bot\n⭐️ عضویت Pro: پردازش بدون صف و نگهداری ۱ روزه\n⚠️ هشدار: مخزن عمومی – فایل شخصی نفرستید.\n📢 حمایت: @maramivpn`;
+            const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
+              `📌 <b>ربات ملی دانلود</b> – راه‌حل سریع و آسان برای دانلود فایل‌های فیلترشده با <b>اینترنت ملی</b>!\n\n` +
+              `🔹 <b>چگونه کار می‌کند؟</b>\n` +
+              `1️⃣ فایل خود را به ربات <code>@filesto_bot</code> بدهید تا لینک مستقیم بگیرید.\n` +
+              `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
+              `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
+              `4️⃣ ربات فایل را دانلود، تکه‌تکه کرده و در گیت‌هاب آپلود می‌کند.\n` +
+              `5️⃣ لینک دانلود (۱ ساعت معتبر) را دریافت کرده و با <b>اینترنت ملی</b> دانلود کنید.\n\n` +
+              `⭐️ <b>عضویت Pro</b>\n` +
+              `• فایل‌های شما تا <b>۱ روز</b> روی سرور می‌ماند (عادی ۱ ساعت)\n` +
+              `• اولویت بالاتر در صف پردازش (پروها زودتر از عادی انجام می‌شوند)\n` +
+              `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
+              `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
+              `⚠️ <b>هشدار امنیتی:</b>\n` +
+              `• فایل‌ها در یک <b>مخزن عمومی گیت‌هاب</b> ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
+              `• لینک دانلود برای کاربران عادی <b>۱ ساعت</b> و برای کاربران Pro <b>۱ روز</b> معتبر است.\n` +
+              `• پس از دانلود، حتماً روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n` +
+              `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
+              `❤️ <b>حمایت و پشتیبانی:</b>\n` +
+              `• کانال تلگرام: @maramidownload\n` +
+              `• عضو شوید تا از آخرین به‌روزرسانی‌ها و تخفیف‌های ویژه مطلع گردید.\n\n` +
+              `👇 با دکمه زیر شروع کنید.`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
