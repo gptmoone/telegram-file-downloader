@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی (اصلاح دستورات ادمین و صف)
+// ربات دانلودر ملی - نسخه نهایی (رفع صف، اولویت Pro، finishing خودکار)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -72,7 +72,7 @@ async function getRepoSize(env) {
   return 0;
 }
 
-// ========== توابع D1 (بدون تغییر) ==========
+// ========== توابع D1 ==========
 async function ensureGlobalStats(env) {
   const row = await env.DB.prepare('SELECT id FROM global_stats WHERE id = 1').first();
   if (!row) {
@@ -370,7 +370,7 @@ export default {
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
-        // ========== دکمه‌ها (بدون تغییر) ==========
+        // ========== دکمه‌ها ==========
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
@@ -408,7 +408,6 @@ export default {
             } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در دریافت آمار.", TOKEN); }
           }
           else if (data === 'status') {
-            // مشابه قبل، برای اختصار حذف شده، اما در کد نهایی موجود است
             try {
               const state = await dbGetUserState(env, chatId);
               if (!state) { await sendSimple(chatId, "📭 هیچ درخواست فعالی ندارید.", TOKEN); return; }
@@ -497,12 +496,12 @@ export default {
           return new Response('OK');
         }
 
-        // ========== پیام متنی (با اولویت دستورات ادمین) ==========
+        // ========== پیام متنی ==========
         if (update.message?.text) {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
 
-          // اولویت 1: دستورات ادمین (با ADMIN_SECRET)
+          // اولویت 1: دستورات ادمین
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -516,7 +515,6 @@ export default {
             }
             return new Response('OK');
           }
-          
           if (text.startsWith('/fixactive')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -529,7 +527,6 @@ export default {
             }
             return new Response('OK');
           }
-          
           if (text.startsWith('/startqueue')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -541,7 +538,7 @@ export default {
             return new Response('OK');
           }
 
-          // اولویت 2: دستور /start
+          // اولویت 2: /start
           if (text === '/start') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
@@ -552,7 +549,6 @@ export default {
 
           // اولویت 3: دریافت لینک جدید
           if (text.match(/^https?:\/\//)) {
-            // حذف شاخه قبلی و پاکسازی وضعیت
             const lastBranch = await dbGetLastBranch(env, chatId);
             if (lastBranch) {
               try {
@@ -569,7 +565,6 @@ export default {
             }
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
-            
             const repoSize = await getRepoSize(env);
             if (repoSize >= REPO_SIZE_LIMIT_GB) {
               await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده. لطفاً چند ساعت بعد تلاش کنید.`, TOKEN);
@@ -588,7 +583,7 @@ export default {
             return new Response('OK');
           }
 
-          // اولویت 4: مرحله رمز عبور
+          // اولویت 4: رمز عبور
           const state = await dbGetUserState(env, chatId);
           if (state && state.status === 'awaiting_password' && state.requestData) {
             const password = text;
@@ -610,7 +605,6 @@ export default {
             return new Response('OK');
           }
 
-          // اگر هیچکدام نبود
           await sendSimple(chatId, "❌ لینک معتبر نیست (با http:// یا https:// شروع شود).", TOKEN);
           return new Response('OK');
         }
