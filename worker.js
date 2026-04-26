@@ -1,12 +1,13 @@
 // ==========================================
-// ربات دانلودر - نسخه نهایی با رفع تکراری پیام‌ها
+// ربات دانلودر ملی - نسخه نهایی با Pro و Cron پاکسازی خودکار
 // ==========================================
 
 const MAIN_KEYBOARD = {
   inline_keyboard: [
     [{ text: "📥 لینک جدید", callback_data: "new_link" }],
     [{ text: "📊 آمار لحظه‌ای", callback_data: "stats" }, { text: "📊 وضعیت من", callback_data: "status" }],
-    [{ text: "❓ راهنما", callback_data: "help" }, { text: "🗑️ حذف فایل من", callback_data: "delete_my_file" }]
+    [{ text: "⭐️ عضویت Pro", callback_data: "pro_info" }, { text: "🗑️ حذف فایل من", callback_data: "delete_my_file" }],
+    [{ text: "❓ راهنما", callback_data: "help" }]
   ]
 };
 const MAX_CONCURRENT = 10;
@@ -20,9 +21,7 @@ const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 
-// کش برای جلوگیری از اجرای مجدد یک دکمه در 3 ثانیه
-const lastCallbackProcessed = new Map();
-
+// ---------- توابع کمکی ----------
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
   const body = {
@@ -72,7 +71,7 @@ async function getRepoSize(env) {
   return 0;
 }
 
-// ========== توابع D1 ==========
+// ---------- توابع D1 ----------
 async function ensureGlobalStats(env) {
   const row = await env.DB.prepare('SELECT id FROM global_stats WHERE id = 1').first();
   if (!row) {
@@ -109,19 +108,26 @@ async function dbSetUserState(env, chatId, status, requestData = null, branchNam
 async function dbDeleteUserState(env, chatId) {
   await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run();
 }
-async function dbGetQueueCount(env) {
-  const row = await env.DB.prepare('SELECT COUNT(*) as count FROM queue').first();
+async function dbGetQueueCount(env, onlyPro = false) {
+  let sql = 'SELECT COUNT(*) as count FROM queue';
+  if (onlyPro) sql += ' WHERE priority = 1';
+  else if (onlyPro === false) sql += ' WHERE priority = 0';
+  const row = await env.DB.prepare(sql).first();
   return row?.count || 0;
 }
-async function dbAddQueue(env, chatId, fileUrl, password, fileSize) {
+async function dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro = false) {
   const now = Date.now();
+  const priority = isPro ? 1 : 0;
   await env.DB.prepare(`
-    INSERT INTO queue (chat_id, file_url, zip_password, file_size, enqueued_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).bind(chatId, fileUrl, password, fileSize, now).run();
+    INSERT INTO queue (chat_id, file_url, zip_password, file_size, enqueued_at, priority)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(chatId, fileUrl, password, fileSize, now, priority).run();
 }
 async function dbPopQueue(env) {
-  const row = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size FROM queue ORDER BY position LIMIT 1').first();
+  let row = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size FROM queue WHERE priority = 1 ORDER BY position ASC LIMIT 1').first();
+  if (!row) {
+    row = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size FROM queue WHERE priority = 0 ORDER BY position ASC LIMIT 1').first();
+  }
   if (!row) return null;
   await env.DB.prepare('DELETE FROM queue WHERE position = ?').bind(row.position).run();
   return {
@@ -134,14 +140,6 @@ async function dbPopQueue(env) {
 async function dbRemoveFromQueue(env, chatId) {
   await env.DB.prepare('DELETE FROM queue WHERE chat_id = ?').bind(chatId).run();
 }
-async function dbGetUsersCount(env) {
-  const row = await env.DB.prepare('SELECT COUNT(*) as count FROM users').first();
-  return row?.count || 0;
-}
-async function dbAddUser(env, chatId) {
-  const now = Date.now();
-  await env.DB.prepare('INSERT OR IGNORE INTO users (chat_id, first_seen) VALUES (?, ?)').bind(chatId, now).run();
-}
 async function dbGetActiveCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first();
   return row?.count || 0;
@@ -150,8 +148,16 @@ async function dbGetActiveBranchesCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM active_branches').first();
   return row?.count || 0;
 }
-async function dbAddActiveBranch(env, branchName, chatId, createdAt) {
-  await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at) VALUES (?, ?, ?)').bind(branchName, chatId, createdAt).run();
+async function dbGetUsersCount(env) {
+  const row = await env.DB.prepare('SELECT COUNT(*) as count FROM users').first();
+  return row?.count || 0;
+}
+async function dbAddUser(env, chatId) {
+  const now = Date.now();
+  await env.DB.prepare('INSERT OR IGNORE INTO users (chat_id, first_seen) VALUES (?, ?)').bind(chatId, now).run();
+}
+async function dbAddActiveBranch(env, branchName, chatId, createdAt, expiresAt) {
+  await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(branchName, chatId, createdAt, expiresAt).run();
 }
 async function dbRemoveActiveBranch(env, branchName) {
   await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branchName).run();
@@ -160,10 +166,122 @@ async function dbGetLastBranch(env, chatId) {
   const row = await env.DB.prepare('SELECT branch_name FROM active_branches WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1').bind(chatId).first();
   return row?.branch_name || null;
 }
-async function dbSetBranchForUser(env, chatId, branchName) {
+async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
   const now = Date.now();
-  await dbAddActiveBranch(env, branchName, chatId, now);
+  await dbAddActiveBranch(env, branchName, chatId, now, expiresAt);
   await env.DB.prepare('UPDATE user_state SET branch_name = ? WHERE chat_id = ?').bind(branchName, chatId).run();
+}
+
+// ---------- توابع اشتراک Pro و NowPayments ----------
+async function isProUser(env, chatId) {
+  const now = Math.floor(Date.now() / 1000);
+  const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
+  return !!row;
+}
+async function activateProSubscription(env, chatId, orderId, amountUSD) {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + (30 * 24 * 60 * 60); // 30 روز
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(chatId, expiresAt, orderId, now).run();
+  await sendSimple(chatId, 
+    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n` +
+    `💎 مبلغ پرداختی: ${amountUSD} USD\n` +
+    `📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n` +
+    `🎁 مزایا:\n• فایل‌های شما تا ۳ روز روی سرور می‌ماند (عادی ۳ ساعت)\n• اولویت بالاتر در صف پردازش\n\n` +
+    `از اعتماد شما سپاسگزاریم! 🚀`, 
+    env.TELEGRAM_TOKEN
+  );
+}
+async function createNowPaymentsInvoice(env, chatId, amountUSD) {
+  const orderId = `pro_${chatId}_${Date.now()}`;
+  const webhookUrl = `https://telegram-file-bot.gptmoone.workers.dev/api/nowpayments-webhook`;
+  const payload = {
+    price_amount: amountUSD,
+    price_currency: "usd",
+    pay_currency: "ton",
+    order_id: orderId,
+    order_description: "اشتراک Pro - ربات دانلودر",
+    ipn_callback_url: webhookUrl,
+    success_url: "https://t.me/MeliDownloadBot?start=pro_success",
+    cancel_url: "https://t.me/MeliDownloadBot?start=pro_cancel"
+  };
+  const response = await fetch('https://api.nowpayments.io/v1/invoice', {
+    method: 'POST',
+    headers: {
+      'x-api-key': env.NOWPAYMENTS_API_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (data.invoice_url) {
+    return { success: true, invoiceUrl: data.invoice_url, orderId: orderId };
+  }
+  return { success: false, error: data };
+}
+async function handleNowPaymentsWebhook(request, env) {
+  try {
+    const body = await request.json();
+    const paymentStatus = body.payment_status;
+    const orderId = body.order_id;
+    const chatId = orderId.split('_')[1];
+    if (paymentStatus === 'finished') {
+      const amountUSD = body.price_amount || 0;
+      await activateProSubscription(env, chatId, orderId, amountUSD);
+      console.log(`✅ Pro activated for ${chatId}`);
+    }
+    return new Response('OK');
+  } catch (err) {
+    console.error('Webhook error:', err);
+    return new Response('Error', { status: 500 });
+  }
+}
+
+// ---------- تابع پاکسازی خودکار (Cron) ----------
+async function cleanupExpiredBranches(env) {
+  const GITHUB_TOKEN = env.GH_TOKEN;
+  const GITHUB_OWNER = 'gptmoone';
+  const GITHUB_REPO = 'telegram-file-downloader';
+  const now = Math.floor(Date.now() / 1000);
+  
+  // 1. دریافت لیست شاخه‌های منقضی از جدول active_branches
+  const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
+  
+  for (const branch of expired.results) {
+    try {
+      // حذف شاخه از ریموت گیت‌هاب
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branch.branch_name}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `token ${GITHUB_TOKEN}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'CloudflareWorkerBot/1.0'
+        }
+      });
+      if (res.ok) {
+        // حذف رکورد از active_branches
+        await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
+        console.log(`✅ Deleted expired branch: ${branch.branch_name}`);
+      } else if (res.status === 404) {
+        // شاخه وجود ندارد، فقط از دیتابیس حذف کن
+        await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
+        console.log(`⚠️ Branch ${branch.branch_name} not found on GitHub, removed from DB`);
+      } else {
+        console.error(`Failed to delete ${branch.branch_name}: ${res.status}`);
+      }
+    } catch (err) {
+      console.error(`Error deleting branch ${branch.branch_name}:`, err);
+    }
+  }
+  
+  // 2. پاکسازی رکوردهای قدیمی user_state (بیش از 1 روز و وضعیت done)
+  await env.DB.prepare('DELETE FROM user_state WHERE status = ? AND started_at <= ?').bind('done', now - 86400).run();
+  // 3. پاکسازی صف‌های قدیمی (بیش از 2 روز)
+  await env.DB.prepare('DELETE FROM queue WHERE enqueued_at <= ?').bind(now * 1000 - 172800000).run();
+  
+  return { deleted: expired.results.length };
 }
 
 async function getFileSize(url) {
@@ -184,9 +302,18 @@ export default {
     const GITHUB_REPO = 'telegram-file-downloader';
     const ADMIN_SECRET = env.ADMIN_SECRET || '';
 
-    try { await ensureGlobalStats(env); } catch(e) { console.error(e); }
+    // ---------- Cron Trigger (پاکسازی خودکار) ----------
+    if (path === '/__cron' && request.method === 'GET') {
+      const result = await cleanupExpiredBranches(env);
+      return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
 
-    // API endpoints
+    // ---------- Webhook NowPayments ----------
+    if (path === '/api/nowpayments-webhook' && request.method === 'POST') {
+      return handleNowPaymentsWebhook(request, env);
+    }
+
+    // ---------- API endpoints قدیمی ----------
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -209,8 +336,11 @@ export default {
       const { user_id, branch } = await request.json();
       if (user_id && branch) {
         const chatId = user_id.split('_')[0];
+        const isPro = await isProUser(env, chatId);
+        const ttlSeconds = isPro ? 3 * 24 * 60 * 60 : 3 * 60 * 60;
+        const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
+        await dbSetBranchForUser(env, chatId, branch, expiresAt);
         await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
-        await dbSetBranchForUser(env, chatId, branch);
         const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
         let fileSizeBytes = 0, password = '';
         if (reqRow && reqRow.request_data) {
@@ -221,8 +351,9 @@ export default {
         const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
         await dbIncrementLinks(env, volumeGB);
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
+        const validityMsg = isPro ? "۳ روز" : "۳ ساعت";
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
-        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (۳ ساعت معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
+        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبור: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
         await dbDeleteUserState(env, chatId);
         await this.finishTask(env);
       }
@@ -248,12 +379,10 @@ export default {
       return new Response('OK');
     }
 
-    // وب‌هوک اصلی
+    // ---------- وب‌هوک اصلی تلگرام ----------
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
-
-        // ثبت کاربر جدید
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
@@ -262,20 +391,8 @@ export default {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
           const data = cb.data;
-          const callbackId = cb.id;
+          await answerCallback(cb.id, TOKEN);
 
-          // جلوگیری از پردازش مجدد یک دکمه در 3 ثانیه
-          const now = Date.now();
-          const lastTime = lastCallbackProcessed.get(`${chatId}_${data}`) || 0;
-          if (now - lastTime < 3000) {
-            return new Response('OK'); // تکراری، نادیده بگیر
-          }
-          lastCallbackProcessed.set(`${chatId}_${data}`, now);
-
-          // پاسخ فوری به تلگرام (ابتدا)
-          await answerCallback(callbackId, TOKEN);
-
-          // راهنما
           if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
               `این ربات لینک مستقیم را به لینک قابل دانلود در اینترنت ملی تبدیل می‌کند.\n\n` +
@@ -285,36 +402,39 @@ export default {
               `3️⃣ رمز عبور دلخواه وارد کنید.\n` +
               `4️⃣ منتظر بمانید تا پردازش شود (لینک خودکار ارسال می‌شود).\n` +
               `5️⃣ پس از دانلود، روی دکمه «حذف فایل من» کلیک کنید.\n\n` +
+              `⭐️ <b>عضویت Pro</b>\n` +
+              `• با فعال‌سازی اشتراک Pro، فایل‌های شما به مدت ۳ روز روی سرور می‌مانند (معمولی ۳ ساعت).\n` +
+              `• در صف اولویت بالاتر دارید و سریع‌تر پردازش می‌شوید.\n` +
+              `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
+              `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
               `🔹 <b>نحوه استخراج:</b>\n` +
               `فایل ZIP را با 7-Zip یا WinRAR باز کنید. فایل archive.7z.001 را استخراج کنید.\n\n` +
               `⚠️ <b>توجه:</b>\n` +
               `• مخزن عمومی است، فایل شخصی نفرستید.\n` +
-              `• لینک دانلود ۳ ساعت معتبر است.\n` +
+              `• لینک دانلود برای کاربران معمولی ۳ ساعت و برای کاربران Pro ۳ روز معتبر است.\n` +
               `• حجم فایل حداکثر ۲ گیگابایت.\n` +
               `• از ارسال محتوای غیرمجاز خودداری کنید.\n\n` +
               `❤️ حمایت: @maramivpn`;
             await sendSimple(chatId, helpText, TOKEN);
           }
-          // آمار
           else if (data === 'stats') {
             try {
               const stats = await dbGetGlobalStats(env);
               const activeCount = await dbGetActiveCount(env);
               const queueCount = await dbGetQueueCount(env);
+              const proQueueCount = await dbGetQueueCount(env, true);
               const totalBranches = await dbGetActiveBranchesCount(env);
               const totalUsers = await dbGetUsersCount(env);
+              const now = Math.floor(Date.now() / 1000);
+              const proUsersCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM pro_users WHERE expires_at > ?').bind(now).first()).count;
               const repoSize = await getRepoSize(env);
               const sizeMsg = repoSize ? `\n📦 حجم مخزن: ${repoSize.toFixed(1)} گیگابایت` : '';
               let warningMsg = '';
               if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن پر است. لطفاً فایل‌های خود را حذف کنید.</b>';
               else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ <b>هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.</b>';
-              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount}\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
-            } catch (err) {
-              console.error('Stats error:', err);
-              await sendSimple(chatId, "⚠️ خطا در دریافت آمار. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN);
-            }
+              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n⭐️ کاربران Pro فعال: ${proUsersCount}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount} (${proQueueCount} پرو)\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
+            } catch (err) { console.error('Stats error:', err); await sendSimple(chatId, "⚠️ خطا در دریافت آمار. لطفاً چند دقیقه دیگر تلاش کنید.", TOKEN); }
           }
-          // وضعیت من
           else if (data === 'status') {
             try {
               const state = await dbGetUserState(env, chatId);
@@ -330,9 +450,16 @@ export default {
               if (state.status === 'processing') {
                 await sendSimple(chatId, `🔄 وضعیت: در حال پردازش...${progress}`, TOKEN);
               } else if (state.status === 'waiting') {
-                const posRow = await env.DB.prepare('SELECT COUNT(*) as pos FROM queue WHERE position <= (SELECT position FROM queue WHERE chat_id = ?)').bind(chatId).first();
-                const pos = posRow ? posRow.pos : '?';
-                await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos})`, TOKEN);
+                const isPro = await isProUser(env, chatId);
+                let pos = 1;
+                if (isPro) {
+                  const row = await env.DB.prepare('SELECT COUNT(*) as pos FROM queue WHERE priority = 1 AND position <= (SELECT position FROM queue WHERE chat_id = ?)').bind(chatId).first();
+                  pos = row?.pos || '?';
+                } else {
+                  const row = await env.DB.prepare('SELECT COUNT(*) as pos FROM queue WHERE priority = 0 AND position <= (SELECT position FROM queue WHERE chat_id = ?)').bind(chatId).first();
+                  pos = row?.pos || '?';
+                }
+                await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos}${isPro ? ' - اولویت Pro' : ''})`, TOKEN);
               } else if (state.status === 'done') {
                 await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${state.branchName}.zip\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» پاک کنید.`, TOKEN);
               } else if (state.status === 'awaiting_password') {
@@ -340,12 +467,8 @@ export default {
               } else {
                 await sendSimple(chatId, "هیچ درخواست فعالی ندارید.", TOKEN);
               }
-            } catch (err) {
-              console.error('Status error:', err);
-              await sendSimple(chatId, "⚠️ خطا در دریافت وضعیت. لطفاً بعداً تلاش کنید.", TOKEN);
-            }
+            } catch (err) { console.error('Status error:', err); await sendSimple(chatId, "⚠️ خطا در دریافت وضعیت. لطفاً بعداً تلاش کنید.", TOKEN); }
           }
-          // حذف فایل من
           else if (data === 'delete_my_file') {
             try {
               const lastBranch = await dbGetLastBranch(env, chatId);
@@ -367,12 +490,8 @@ export default {
               } else {
                 await sendSimple(chatId, "❌ فایل قبلاً حذف شده یا یافت نشد.", TOKEN);
               }
-            } catch (err) {
-              console.error('Delete error:', err);
-              await sendSimple(chatId, "⚠️ خطا در حذف فایل. لطفاً بعداً تلاش کنید.", TOKEN);
-            }
+            } catch (err) { console.error('Delete error:', err); await sendSimple(chatId, "⚠️ خطا در حذف فایل. لطفاً بعداً تلاش کنید.", TOKEN); }
           }
-          // لینک جدید
           else if (data === 'new_link') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
@@ -392,10 +511,40 @@ export default {
             }
             await sendSimple(chatId, "✅ درخواست قبلی لغو شد. اکنون لینک جدید را ارسال کنید.\n(برای لینک مستقیم تلگرام: @filesto_bot)", TOKEN);
           }
+          else if (data === 'pro_info') {
+            const isPro = await isProUser(env, chatId);
+            if (isPro) {
+              const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ?').bind(chatId).first();
+              const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
+              await sendSimple(chatId, `⭐️ وضعیت اشتراک **Pro** شما\n\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n💡 برای تمدید، مجدداً روی دکمه Pro کلیک کنید.`, TOKEN);
+            } else {
+              const amountUSD = parseFloat(env.PRO_PRICE) || 5;
+              const invoice = await createNowPaymentsInvoice(env, chatId, amountUSD);
+              if (invoice.success) {
+                const proKeyboard = {
+                  inline_keyboard: [
+                    [{ text: "💰 پرداخت با ارز دیجیتال", url: invoice.invoiceUrl }],
+                    [{ text: "🔙 بازگشت", callback_data: "stats" }]
+                  ]
+                };
+                await sendMessage(chatId, 
+                  `⭐️ <b>عضویت ویژه (Pro)</b>\n\n` +
+                  `با فعال‌سازی اشتراک Pro از مزایای زیر بهره‌مند شوید:\n` +
+                  `• 🔥 فایل‌های شما تا <b>۳ روز</b> روی سرور می‌ماند (معمولی ۳ ساعت)\n` +
+                  `• 🚀 اولویت بالاتر در صف پردازش (پروها زودتر از عادی پردازش می‌شوند)\n` +
+                  `• 💖 پشتیبانی ویژه\n\n` +
+                  `💰 هزینه اشتراک یک ماهه: <b>${amountUSD} دلار</b> (معادل حدود ${(amountUSD/5).toFixed(2)} TON)\n\n` +
+                  `⚠️ پس از پرداخت، اشتراک شما به طور <b>خودکار</b> فعال می‌شود.`,
+                  proKeyboard, TOKEN);
+              } else {
+                await sendSimple(chatId, `❌ خطا در ایجاد فاکتور پرداخت. لطفاً بعداً تلاش کنید.`, TOKEN);
+              }
+            }
+          }
           return new Response('OK');
         }
 
-        // پیام متنی
+        // ---------- پیام متنی ----------
         if (update.message?.text) {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
@@ -417,12 +566,13 @@ export default {
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در اینترنت ملی دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
+              `⭐️ <b>عضویت Pro</b>\nبرای پردازش بدون صف و اولویت بالاتر، روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
               `⚠️ <b>هشدار امنیتی:</b>\n` +
               `فایل‌ها در مخزن عمومی گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی خودداری کنید.\n\n` +
               `⚠️ <b>مدیریت حجم مخزن:</b>\n` +
               `• پس از دانلود، حتماً روی دکمه «🗑️ حذف فایل من» کلیک کنید تا فایل پاک شود.\n` +
               `• این کار به همه اجازه می‌دهد از سرویس استفاده کنند.\n\n` +
-              `⚠️ لینک دانلود تا ۳ ساعت معتبر است.\n\n` +
+              `⚠️ لینک دانلود برای کاربران عادی ۳ ساعت و برای کاربران Pro ۳ روز معتبر است.\n\n` +
               `📢 حمایت: @maramivpn`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
@@ -470,17 +620,18 @@ export default {
             const password = text;
             const fileUrl = state.requestData.url;
             const fileSize = state.requestData.fileSize || 0;
+            const isPro = await isProUser(env, chatId);
             await dbDeleteUserState(env, chatId);
             const activeCount = await dbGetActiveCount(env);
-            const queueCount = await dbGetQueueCount(env);
             if (activeCount < MAX_CONCURRENT) {
               await dbSetUserState(env, chatId, 'processing', { url: fileUrl, password: password, fileSize: fileSize });
               this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...\n(برای فایل‌های حجیم، ممکن است ۳۰-۴۰ دقیقه طول بکشد)", TOKEN);
             } else {
-              await dbAddQueue(env, chatId, fileUrl, password, fileSize);
+              await dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro);
               await dbSetUserState(env, chatId, 'waiting', { url: fileUrl, password: password, fileSize: fileSize });
-              await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${queueCount + 1}`, TOKEN);
+              const pos = await (isPro ? dbGetQueueCount(env, true) : dbGetQueueCount(env, false));
+              await sendSimple(chatId, `⏳ در صف قرار گرفتید. شماره صف: ${pos}${isPro ? ' (اولویت Pro)' : ''}`, TOKEN);
             }
             return new Response('OK');
           }
