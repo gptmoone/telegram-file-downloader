@@ -15,10 +15,6 @@ on:
         description: 'شناسه کاربر'
         required: true
         type: string
-      cleanup_branch:
-        description: 'شاخه قبلی کاربر برای حذف (اختیاری)'
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -27,13 +23,6 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete previous branch if exists
-        if: inputs.cleanup_branch != ''
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git push origin --delete "${{ inputs.cleanup_branch }}" || echo "Branch not found, continuing"
-
       - name: Notify Worker that job started
         run: |
           curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/started" \
@@ -118,7 +107,7 @@ jobs:
           done
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
-      - name: Notify Worker that job is done (success)
+      - name: Notify Worker that job is done
         run: |
           curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
             -H "Content-Type: application/json" \
