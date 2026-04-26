@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی با سهمیه روزانه و دکمه کانال
+// ربات دانلودر ملی - نسخه نهایی با رفع NaN و دستور ریست سهمیه
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -10,7 +10,7 @@ const MAIN_KEYBOARD = {
     [{ text: "❓ راهنما", callback_data: "help" }, { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }]
   ]
 };
-const MAX_CONCURRENT = 5;        // حداکثر پردازش همزمان (کاهش به 4)
+const MAX_CONCURRENT = 4;
 const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
 const START_WAIT_INTERVAL = 30000;
@@ -20,10 +20,10 @@ const WAIT_INTERVAL = 60000;
 const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
-const TTL_NORMAL = 3600;      // 1 ساعت
-const TTL_PRO = 86400;        // 1 روز
-const DAILY_LIMIT_NORMAL = 1;  // کاربر عادی: 1 فایل در روز
-const DAILY_LIMIT_PRO = 5;     // کاربر Pro: 5 فایل در روز
+const TTL_NORMAL = 3600;
+const TTL_PRO = 86400;
+const DAILY_LIMIT_NORMAL = 1;
+const DAILY_LIMIT_PRO = 5;
 
 const lastCallbackProcessed = new Map();
 
@@ -182,7 +182,7 @@ async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
   }
 }
 
-// ========== توابع محدودیت روزانه ==========
+// ========== توابع محدودیت روزانه (اصلاح شده برای جلوگیری از NaN) ==========
 async function getDailyLimit(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
   let row = await env.DB.prepare('SELECT file_count, reset_date FROM daily_limits WHERE chat_id = ?').bind(chatId).first();
@@ -190,7 +190,8 @@ async function getDailyLimit(env, chatId) {
     await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date) VALUES (?, 0, ?)').bind(chatId, todayStart).run();
     row = { file_count: 0, reset_date: todayStart };
   }
-  return { fileCount: row.file_count, resetDate: row.reset_date };
+  const fileCount = typeof row.file_count === 'number' ? row.file_count : 0;
+  return { fileCount, resetDate: row.reset_date };
 }
 async function incrementDailyLimit(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
@@ -206,15 +207,19 @@ async function incrementDailyLimit(env, chatId) {
 async function canUpload(env, chatId, isPro) {
   const { fileCount } = await getDailyLimit(env, chatId);
   const limit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_NORMAL;
-  return { allowed: fileCount < limit, current: fileCount, limit: limit };
+  const remaining = Math.max(0, limit - fileCount);
+  return { allowed: remaining > 0, current: fileCount, limit, remaining };
 }
-async function getRemainingQuota(env, chatId, isPro) {
-  const { fileCount } = await getDailyLimit(env, chatId);
-  const limit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_NORMAL;
-  return `${limit - fileCount} از ${limit}`;
+async function resetUserQuota(env, chatId) {
+  const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+  await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date) VALUES (?, 0, ?)').bind(chatId, todayStart).run();
+}
+async function getRemainingQuotaText(env, chatId, isPro) {
+  const { remaining, limit } = await canUpload(env, chatId, isPro);
+  return `سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
 }
 
-// ========== توابع Pro و NowPayments ==========
+// ========== توابع Pro و NowPayments (بدون تغییر) ==========
 async function isProUser(env, chatId) {
   const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
@@ -277,7 +282,7 @@ async function handleNowPaymentsWebhook(request, env) {
   }
 }
 
-// ========== تابع پاکسازی خودکار (Cron) ==========
+// ========== پاکسازی خودکار ==========
 async function cleanupExpiredBranches(env) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
@@ -325,7 +330,7 @@ async function getFileSize(url) {
   } catch { return null; }
 }
 
-// ========== دستور مدیریتی تبدیل کاربر به Pro ==========
+// ========== دستورات ادمین ==========
 async function adminPromoteToPro(env, chatId, targetChatId, adminSecret, providedSecret, TOKEN) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const userExists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetChatId).first();
@@ -337,6 +342,13 @@ async function adminPromoteToPro(env, chatId, targetChatId, adminSecret, provide
     VALUES (?, ?, ?, ?)
   `).bind(targetChatId, expiresAt, `admin_${Date.now()}`, now).run();
   return `✅ کاربر ${targetChatId} با موفقیت به عضویت Pro درآمد. اشتراک تا ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')} معتبر است.`;
+}
+async function adminResetQuota(env, chatId, targetChatId, adminSecret, providedSecret, TOKEN) {
+  if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
+  const userExists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetChatId).first();
+  if (!userExists) return "❌ کاربر مورد نظر یافت نشد.";
+  await resetUserQuota(env, targetChatId);
+  return `✅ سهمیه روزانه کاربر ${targetChatId} با موفقیت بازنشانی شد. او می‌تواند دوباره تا سقف ${DAILY_LIMIT_NORMAL} فایل (یا برای Pro تا ${DAILY_LIMIT_PRO} فایل) استفاده کند.`;
 }
 
 export default {
@@ -353,7 +365,7 @@ export default {
       await ensureGlobalStats(env);
     } catch(e) { console.error('ensureGlobalStats error:', e); }
 
-    // ========== API endpoints ==========
+    // API endpoints
     if (path === '/api/cleanup-branches' && request.method === 'POST') {
       return handleCleanupBranches(request, env);
     }
@@ -382,10 +394,7 @@ export default {
     if (path === '/api/complete' && request.method === 'POST') {
       try {
         const { user_id, branch } = await request.json();
-        if (!user_id || !branch) {
-          console.error('Invalid /api/complete payload:', { user_id, branch });
-          return new Response('OK');
-        }
+        if (!user_id || !branch) return new Response('OK');
         const chatId = user_id.split('_')[0];
         const isPro = await isProUser(env, chatId);
         const ttl = isPro ? TTL_PRO : TTL_NORMAL;
@@ -401,7 +410,6 @@ export default {
           fileSizeBytes = req.fileSize || 0;
           password = req.password || '';
         }
-
         const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
         await dbIncrementLinks(env, volumeGB);
         await incrementDailyLimit(env, chatId);
@@ -409,14 +417,15 @@ export default {
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۱ روز" : "۱ ساعت";
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
-        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
+        const quotaText = await getRemainingQuotaText(env, chatId, isPro);
+        await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.\n\n${quotaText}`, TOKEN);
 
         await dbDeleteUserState(env, chatId);
         await this.finishTask(env);
         return new Response('OK');
       } catch (err) {
         console.error('Error in /api/complete:', err);
-        await this.finishTask(env).catch(e => console.error('finishTask error:', e));
+        await this.finishTask(env).catch(e => console.error(e));
         return new Response('OK');
       }
     }
@@ -451,7 +460,7 @@ export default {
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
-        // ========== دکمه‌ها ==========
+        // دکمه‌ها
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
@@ -484,14 +493,14 @@ export default {
               `• روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه <b>Extract Here</b> (یا استخراج در اینجا) را انتخاب کنید.\n` +
               `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را تحویل می‌دهد.\n\n` +
               `⚠️ <b>توجه امنیتی و قانونی:</b>\n` +
-              `• فایل‌ها در یک <b>مخزن عمومی گیت‌هاب</b> ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.\n` +
-              `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b> ربات و توسعه‌دهنده هیچ مسئولیتی در قبال محتوای ارسالی ندارد.\n` +
-              `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران و قوانین بین‌المللی می‌شوید.\n` +
+              `• فایل‌ها در یک <b>مخزن عمومی گیت‌هاب</b> ذخیره می‌شوند. از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.\n` +
+              `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b>\n` +
+              `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران می‌شوید.\n` +
               `• لینک دانلود برای کاربران عادی <b>۱ ساعت</b> و برای کاربران Pro <b>۱ روز</b> معتبر است.\n` +
               `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n\n` +
               `❤️ <b>حمایت و پشتیبانی:</b>\n` +
               `• کانال تلگرام: @maramidownload\n` +
-              `• عضو شوید تا از آخرین به‌روزرسانی‌ها و تخفیف‌های ویژه مطلع گردید.\n\n` +
+              `• برای گزارش مشکلات، درخواست راهنما یا ایده‌های جدید، در کانال پیام بگذارید.\n\n` +
               `📢 ما را به دوستان خود معرفی کنید.`;
             await sendSimple(chatId, helpText, TOKEN);
           }
@@ -514,30 +523,28 @@ export default {
           }
           else if (data === 'status') {
             try {
-              // ابتدا سهمیه روزانه را بگیر
               const isPro = await isProUser(env, chatId);
-              const { fileCount, limit } = await canUpload(env, chatId, isPro);
-              const remainingQuota = `${limit - fileCount} از ${limit}`;
-              
+              const { remaining, limit } = await canUpload(env, chatId, isPro);
+              const quotaText = `📊 سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
               const lastBranch = await dbGetLastBranch(env, chatId);
               if (lastBranch) {
                 const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${lastBranch}.zip`;
-                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: ${link}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» پاک کنید.\n\n📊 سهمیه باقیمانده امروز: ${remainingQuota} فایل`, TOKEN);
+                await sendSimple(chatId, `✅ فایل شما آماده است!\n\n🔗 لینک دانلود: ${link}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» پاک کنید.\n\n${quotaText}`, TOKEN);
                 return;
               }
               const state = await dbGetUserState(env, chatId);
-              if (!state) { 
-                await sendSimple(chatId, `📭 هیچ درخواست فعالی ندارید.\n\n📊 سهمیه باقیمانده امروز: ${remainingQuota} فایل`, TOKEN); 
-                return; 
+              if (!state) {
+                await sendSimple(chatId, `📭 هیچ درخواست فعالی ندارید.\n\n${quotaText}`, TOKEN);
+                return;
               }
               let progress = '';
               if (state.totalChunks && state.uploadedChunks) {
                 const percent = Math.round(state.uploadedChunks / state.totalChunks * 100);
                 progress = `\n📦 پیشرفت آپلود: ${state.uploadedChunks} از ${state.totalChunks} تکه (${percent}%)`;
               }
-              if (state.status === 'processing') await sendSimple(chatId, `🔄 وضعیت: در حال پردازش...${progress}\n\n📊 سهمیه باقیمانده امروز: ${remainingQuota} فایل`, TOKEN);
-              else if (state.status === 'waiting') {
-                const isPro = await isProUser(env, chatId);
+              if (state.status === 'processing') {
+                await sendSimple(chatId, `🔄 وضعیت: در حال پردازش...${progress}\n\n${quotaText}`, TOKEN);
+              } else if (state.status === 'waiting') {
                 let pos = 1;
                 if (isPro) {
                   const row = await env.DB.prepare('SELECT COUNT(*) as pos FROM queue WHERE priority = 1 AND position <= (SELECT position FROM queue WHERE chat_id = ?)').bind(chatId).first();
@@ -546,11 +553,11 @@ export default {
                   const row = await env.DB.prepare('SELECT COUNT(*) as pos FROM queue WHERE priority = 0 AND position <= (SELECT position FROM queue WHERE chat_id = ?)').bind(chatId).first();
                   pos = row?.pos || '?';
                 }
-                await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos}${isPro ? ' - اولویت Pro' : ''})\n\n📊 سهمیه باقیمانده امروز: ${remainingQuota} فایل`, TOKEN);
+                await sendSimple(chatId, `⏳ وضعیت: در صف انتظار (شماره صف: ${pos}${isPro ? ' - اولویت Pro' : ''})\n\n${quotaText}`, TOKEN);
               } else if (state.status === 'awaiting_password') {
-                await sendSimple(chatId, `🔐 منتظر رمز عبور هستم. لطفاً رمز خود را ارسال کنید.\n\n📊 سهمیه باقیمانده امروز: ${remainingQuota} فایل`, TOKEN);
+                await sendSimple(chatId, `🔐 منتظر رمز عبور هستم. لطفاً رمز خود را ارسال کنید.\n\n${quotaText}`, TOKEN);
               } else {
-                await sendSimple(chatId, `هیچ درخواست فعالی ندارید.\n\n📊 سهمیه باقیمانده امروز: ${remainingQuota} فایل`, TOKEN);
+                await sendSimple(chatId, `هیچ درخواست فعالی ندارید.\n\n${quotaText}`, TOKEN);
               }
             } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در دریافت وضعیت.", TOKEN); }
           }
@@ -676,6 +683,18 @@ export default {
             await sendSimple(chatId, result, TOKEN);
             return new Response('OK');
           }
+          if (text.startsWith('/resetquota')) {
+            const parts = text.split(' ');
+            if (parts.length < 3) {
+              await sendSimple(chatId, "❌ دستور صحیح: /resetquota <ADMIN_SECRET> <USER_ID>", TOKEN);
+              return new Response('OK');
+            }
+            const secret = parts[1];
+            const targetUserId = parts[2];
+            const result = await adminResetQuota(env, chatId, targetUserId, ADMIN_SECRET, secret, TOKEN);
+            await sendSimple(chatId, result, TOKEN);
+            return new Response('OK');
+          }
           if (text === '/myid') {
             await sendSimple(chatId, `🆔 شناسه چت (Chat ID) شما: <code>${chatId}</code>`, TOKEN);
             return new Response('OK');
@@ -705,7 +724,7 @@ export default {
               `• پس از دانلود، حتماً روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید.\n\n` +
               `❤️ <b>حمایت و پشتیبانی:</b>\n` +
               `• کانال تلگرام: @maramidownload\n` +
-              `• عضو شوید تا از آخرین به‌روزرسانی‌ها مطلع گردید.\n\n` +
+              `• برای گزارش مشکلات، درخواست راهنما یا ایده‌های جدید، در کانال پیام بگذارید.\n\n` +
               `👇 با دکمه زیر شروع کنید.`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
@@ -714,12 +733,11 @@ export default {
           // دریافت لینک جدید (با نمایش سهمیه باقیمانده)
           if (text.match(/^https?:\/\//)) {
             const isPro = await isProUser(env, chatId);
-            const { allowed, current, limit } = await canUpload(env, chatId, isPro);
+            const { allowed, remaining, limit } = await canUpload(env, chatId, isPro);
             if (!allowed) {
               await sendSimple(chatId, `❌ شما به حداکثر سهمیه روزانه (${limit} فایل) رسیده‌اید. لطفاً فردا دوباره تلاش کنید یا اشتراک Pro تهیه کنید تا سهمیه شما به ${DAILY_LIMIT_PRO} فایل در روز افزایش یابد.`, TOKEN);
               return new Response('OK');
             }
-            const remaining = limit - current;
             const quotaMsg = `📊 سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
 
             const lastBranch = await dbGetLastBranch(env, chatId);
@@ -756,7 +774,7 @@ export default {
             return new Response('OK');
           }
 
-          // رمز عبور (بدون تغییر، فقط پیام سهمیه اضافه شده در مرحله قبل)
+          // رمز عبور
           const state = await dbGetUserState(env, chatId);
           if (state && state.status === 'awaiting_password' && state.requestData) {
             const password = text;
