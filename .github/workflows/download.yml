@@ -108,14 +108,11 @@ jobs:
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
       - name: Notify Worker that job is done
+        # اصلاح: استفاده از یک خط کامل و فرار صحیح از دابل‌کوت
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" \
-            -H "Content-Type": application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"branch\":\"${{ env.BRANCH_NAME }}\"}"
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" -H "Content-Type: application/json" -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\"}"
 
       - name: Notify Worker on failure
         if: failure()
         run: |
-          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
-            -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" -H "Content-Type: application/json" -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"error\":\"Workflow failed\"}"
