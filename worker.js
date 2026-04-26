@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی با رفع مشکلات صف و حذف تکراری
+// ربات دانلودر ملی - نسخه نهایی (رفع مشکل صف پس از ریست)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -21,7 +21,6 @@ const MAX_WAIT_CYCLES = 60;
 const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 
-// کش برای جلوگیری از پردازش مجدد دکمه در کمتر از 3 ثانیه
 const lastCallbackProcessed = new Map();
 
 async function sendMessage(chatId, text, keyboard, TOKEN) {
@@ -113,7 +112,7 @@ async function dbDeleteUserState(env, chatId) {
 async function dbGetQueueCount(env, onlyPro = false) {
   let sql = 'SELECT COUNT(*) as count FROM queue';
   if (onlyPro) sql += ' WHERE priority = 1';
-  else if (onlyPro === false && onlyPro !== undefined) sql += ' WHERE priority = 0'; // اگر false داده شده باشد
+  else if (onlyPro === false && onlyPro !== undefined) sql += ' WHERE priority = 0';
   const row = await env.DB.prepare(sql).first();
   return row?.count || 0;
 }
@@ -298,7 +297,7 @@ export default {
       return handleNowPaymentsWebhook(request, env);
     }
 
-    // API endpoints (بدون تغییر)
+    // API endpoints
     if (path === '/api/started' && request.method === 'POST') {
       const { user_id } = await request.json();
       if (user_id) {
@@ -377,15 +376,12 @@ export default {
           const chatId = cb.message.chat.id.toString();
           const data = cb.data;
           const callbackId = cb.id;
-          
-          // جلوگیری از پردازش مجدد یک دکمه در کمتر از 3 ثانیه
           const now = Date.now();
           const lastTime = lastCallbackProcessed.get(`${chatId}_${data}`) || 0;
           if (now - lastTime < 3000) {
             return new Response('OK');
           }
           lastCallbackProcessed.set(`${chatId}_${data}`, now);
-          
           await answerCallback(callbackId, TOKEN);
 
           if (data === 'help') {
@@ -523,7 +519,6 @@ export default {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
           
-          // دستور /resetstats (ریست کامل صف و پردازش‌ها)
           if (text.startsWith('/resetstats')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -536,7 +531,6 @@ export default {
             return new Response('OK');
           }
           
-          // دستور /fixactive (فقط لغو processingهای گیر کرده و شروع صف)
           if (text === '/fixactive') {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -549,7 +543,6 @@ export default {
             return new Response('OK');
           }
           
-          // دستور /startqueue (فقط شروع صف بدون تغییر در پردازش‌ها)
           if (text === '/startqueue') {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
@@ -566,21 +559,16 @@ export default {
               `لینک مستقیم فایل را بفرستید تا لینک قابل دانلود در اینترنت ملی دریافت کنید.\n\n` +
               `🔹 برای دریافت لینک مستقیم فایل تلگرام، فایل را به @filesto_bot فوروارد کنید.\n\n` +
               `⭐️ <b>عضویت Pro</b>\nبرای پردازش بدون صف و اولویت بالاتر، روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
-              `⚠️ <b>هشدار امنیتی:</b>\n` +
-              `فایل‌ها در مخزن عمومی گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی خودداری کنید.\n\n` +
-              `⚠️ <b>مدیریت حجم مخزن:</b>\n` +
-              `• پس از دانلود، حتماً روی دکمه «🗑️ حذف فایل من» کلیک کنید تا فایل پاک شود.\n` +
-              `• این کار به همه اجازه می‌دهد از سرویس استفاده کنند.\n\n` +
-              `⚠️ لینک دانلود برای کاربران عادی ۳ ساعت و برای کاربران Pro ۳ روز معتبر است.\n\n` +
-              `📢 حمایت: @maramivpn`;
+              `⚠️ <b>هشدار امنیتی:</b>\nفایل‌ها در مخزن عمومی گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی خودداری کنید.\n\n` +
+              `⚠️ <b>مدیریت حجم مخزن:</b>\n• پس از دانلود، حتماً روی دکمه «🗑️ حذف فایل من» کلیک کنید تا فایل پاک شود.\n• این کار به همه اجازه می‌دهد از سرویس استفاده کنند.\n\n` +
+              `⚠️ لینک دانلود برای کاربران عادی ۳ ساعت و برای کاربران Pro ۳ روز معتبر است.\n\n📢 حمایت: @maramivpn`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
-          // دریافت لینک جدید
+          // دریافت لینک جدید - حذف شاخه قبلی در Worker
           if (text.match(/^https?:\/\//)) {
-            await dbDeleteUserState(env, chatId);
-            await dbRemoveFromQueue(env, chatId);
+            // حذف شاخه قبلی
             const lastBranch = await dbGetLastBranch(env, chatId);
             if (lastBranch) {
               try {
@@ -593,8 +581,13 @@ export default {
                   }
                 });
                 await dbRemoveActiveBranch(env, lastBranch);
-              } catch(e) { console.error(e); }
+                console.log(`Deleted previous branch ${lastBranch} for user ${chatId}`);
+              } catch(e) { console.error('Delete previous branch error:', e); }
             }
+            
+            await dbDeleteUserState(env, chatId);
+            await dbRemoveFromQueue(env, chatId);
+            
             const repoSize = await getRepoSize(env);
             if (repoSize >= REPO_SIZE_LIMIT_GB) {
               await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده. لطفاً چند ساعت بعد تلاش کنید.`, TOKEN);
@@ -602,11 +595,13 @@ export default {
             } else if (repoSize >= REPO_SIZE_WARNING_GB) {
               await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). پس از دانلود، فایل را حذف کنید.`, TOKEN);
             }
+            
             const fileSize = await getFileSize(text);
             if (fileSize && fileSize > 2 * 1024 * 1024 * 1024) {
               await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است. لطفاً فایل کوچک‌تری انتخاب کنید.", TOKEN);
               return new Response('OK');
             }
+            
             await dbSetUserState(env, chatId, 'awaiting_password', { url: text, fileSize: fileSize || 0 });
             const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
             await sendMessage(chatId, "✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n(این رمز برای باز کردن فایل نهایی لازم است، حتماً آن را حفظ کنید.)", cancelKeyboard, TOKEN);
