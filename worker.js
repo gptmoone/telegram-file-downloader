@@ -42,7 +42,7 @@ async function sendMessage(chatId, text, keyboard, TOKEN) {
     chat_id: chatId,
     text: text,
     parse_mode: 'HTML',
-    disable_web_page_preview: false,
+    disable_web_page_preview: true,
     reply_markup: JSON.stringify(keyboard || MAIN_KEYBOARD)
   };
   return fetch(url, {
@@ -950,7 +950,7 @@ export default {
             const welcome = `🌀 <b>به ربات دانلودر خوش آمدید</b> 🌀\n\n` +
               `📌 <b>ربات ملی دانلود</b> – راه‌حل سریع و آسان برای دانلود فایل‌های فیلترشده با <b>اینترنت ملی</b>!\n\n` +
               `🔹 <b>چگونه کار می‌کند؟</b>\n` +
-              `1️⃣ برای دریافت لینک مستقیم فایل تلگرام، فایل خود را به ربات <a href="https://t.me/filesto_bot">@filesto_bot</a> فوروارد کنید.\n` +
+              `1️⃣ برای دریافت لینک مستقیم فایل تلگرام، فایل خود را به ربات @filesto_bot فوروارد کنید.\n` +
               `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
               `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
               `4️⃣ ربات فایل را دانلود، تکه‌تکه کرده و در گیت‌هاب آپلود می‌کند.\n` +
