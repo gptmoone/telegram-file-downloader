@@ -29,10 +29,13 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
 
-      - name: Checkout
+      - name: Checkout (optimized)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          sparse-checkout: |
+            .github/workflows
+          sparse-checkout-cone-mode: false
 
       - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
@@ -118,4 +121,4 @@ jobs:
         run: |
           curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" \
             -H "Content-Type: application/json" \
-            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}"
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"error\":\"Workflow failed\"}
