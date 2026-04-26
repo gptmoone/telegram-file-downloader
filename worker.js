@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی (رفع ارسال خودکار لینک و مدیریت صف)
+// ربات دانلودر ملی - نسخه نهایی (با رفع ارسال خودکار لینک)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -183,13 +183,13 @@ async function isProUser(env, chatId) {
 }
 async function activateProSubscription(env, chatId, orderId, amountUSD) {
   const now = Math.floor(Date.now() / 1000);
-  const expiresAt = now + (30 * 24 * 60 * 60); // 30 روز
+  const expiresAt = now + (30 * 24 * 60 * 60);
   await env.DB.prepare(`
     INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at)
     VALUES (?, ?, ?, ?)
   `).bind(chatId, expiresAt, orderId, now).run();
   await sendSimple(chatId, 
-    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountUSD} USD\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند (پس از تغییر)\n• اولویت بالاتر در صف پردازش\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
+    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountUSD} USD\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
     env.TELEGRAM_TOKEN
   );
 }
@@ -330,7 +330,7 @@ export default {
         const ttl = isPro ? TTL_PRO : TTL_NORMAL;
         const expiresAt = Math.floor(Date.now() / 1000) + ttl;
         
-        // ذخیره شاخه در active_branches و به‌روزرسانی user_state (اگر وجود داشته باشد)
+        // ذخیره شاخه در active_branches و به‌روزرسانی user_state
         await dbSetBranchForUser(env, chatId, branch, expiresAt);
         await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
         
@@ -342,19 +342,19 @@ export default {
           fileSizeBytes = req.fileSize || 0;
           password = req.password || '';
         }
-        // به‌روزرسانی آمار کلی (تعداد لینک‌ها و حجم کل)
+        // به‌روزرسانی آمار کلی
         const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
         await dbIncrementLinks(env, volumeGB);
         
-        // ارسال پیام موفقیت به کاربر (همیشه ارسال شود)
+        // ارسال پیام موفقیت به کاربر
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۱ روز" : "۱ ساعت";
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.`, TOKEN);
         
-        // حذف رکورد user_state فعلی (اختیاری)
+        // حذف رکورد user_state فعلی
         await dbDeleteUserState(env, chatId);
-        // فراخوانی finishTask برای شروع تسک بعدی از صف
+        // شروع تسک بعدی از صف
         await this.finishTask(env);
         return new Response('OK', { status: 200 });
       } catch (err) {
@@ -428,7 +428,7 @@ export default {
           }
           else if (data === 'status') {
             try {
-              // اول از active_branches لینک آماده را نشان بده
+              // ابتدا از active_branches لینک آماده را نشان بده
               const lastBranch = await dbGetLastBranch(env, chatId);
               if (lastBranch) {
                 const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${lastBranch}.zip`;
