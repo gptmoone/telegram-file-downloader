@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه نهایی (رفع پاکسازی خودکار، متن کامل خوش‌آمدگویی)
+// ربات دانلودر ملی - نسخه نهایی (با محدودیت روزانه و دستور ادمین)
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -10,7 +10,7 @@ const MAIN_KEYBOARD = {
     [{ text: "❓ راهنما", callback_data: "help" }]
   ]
 };
-const MAX_CONCURRENT = 5;
+const MAX_CONCURRENT = 4;        // حداکثر پردازش همزمان
 const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
 const START_WAIT_INTERVAL = 30000;
@@ -22,6 +22,8 @@ const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 const TTL_NORMAL = 3600;      // 1 ساعت
 const TTL_PRO = 86400;        // 1 روز
+const DAILY_LIMIT_NORMAL = 1;  // کاربر عادی: 1 فایل در روز
+const DAILY_LIMIT_PRO = 5;     // کاربر Pro: 5 فایل در روز
 
 const lastCallbackProcessed = new Map();
 
@@ -180,6 +182,34 @@ async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
   }
 }
 
+// ========== توابع محدودیت روزانه ==========
+async function getDailyLimit(env, chatId) {
+  const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+  let row = await env.DB.prepare('SELECT file_count, reset_date FROM daily_limits WHERE chat_id = ?').bind(chatId).first();
+  if (!row || row.reset_date < todayStart) {
+    // روز جدید، ریست کن
+    await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date) VALUES (?, 0, ?)').bind(chatId, todayStart).run();
+    row = { file_count: 0, reset_date: todayStart };
+  }
+  return { fileCount: row.file_count, resetDate: row.reset_date };
+}
+async function incrementDailyLimit(env, chatId) {
+  const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+  await env.DB.prepare(`
+    INSERT INTO daily_limits (chat_id, file_count, reset_date)
+    VALUES (?, 1, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET
+      file_count = file_count + 1,
+      reset_date = excluded.reset_date
+    WHERE daily_limits.reset_date >= ?
+  `).bind(chatId, todayStart, todayStart).run();
+}
+async function canUpload(env, chatId, isPro) {
+  const { fileCount } = await getDailyLimit(env, chatId);
+  const limit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_NORMAL;
+  return fileCount < limit;
+}
+
 // ========== توابع Pro و NowPayments ==========
 async function isProUser(env, chatId) {
   const now = Math.floor(Date.now() / 1000);
@@ -194,7 +224,7 @@ async function activateProSubscription(env, chatId, orderId, amountUSD) {
     VALUES (?, ?, ?, ?)
   `).bind(chatId, expiresAt, orderId, now).run();
   await sendSimple(chatId, 
-    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountUSD} USD\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
+    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountUSD} USD\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n• حداکثر ۵ فایل در روز\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
     env.TELEGRAM_TOKEN
   );
 }
@@ -243,36 +273,40 @@ async function handleNowPaymentsWebhook(request, env) {
   }
 }
 
-// ========== endpoint پاکسازی برنچ‌های منقضی (برای فراخوانی از GitHub Actions) ==========
+// ========== تابع پاکسازی خودکار (Cron) ==========
+async function cleanupExpiredBranches(env) {
+  const GITHUB_TOKEN = env.GH_TOKEN;
+  const GITHUB_OWNER = 'gptmoone';
+  const GITHUB_REPO = 'telegram-file-downloader';
+  const now = Math.floor(Date.now() / 1000);
+  const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
+  let deleted = 0;
+  for (const branch of expired.results) {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branch.branch_name}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `token ${GITHUB_TOKEN}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'CloudflareWorkerBot/1.0'
+        }
+      });
+      if (res.ok || res.status === 404) {
+        await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
+        deleted++;
+      }
+    } catch (err) { console.error(err); }
+  }
+  return { deleted };
+}
 async function handleCleanupBranches(request, env) {
   try {
     const { secret } = await request.json();
     if (secret !== env.ADMIN_SECRET) {
       return new Response('Unauthorized', { status: 401 });
     }
-    const GITHUB_TOKEN = env.GH_TOKEN;
-    const GITHUB_OWNER = 'gptmoone';
-    const GITHUB_REPO = 'telegram-file-downloader';
-    const now = Math.floor(Date.now() / 1000);
-    const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
-    let deleted = 0;
-    for (const branch of expired.results) {
-      try {
-        const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branch.branch_name}`, {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `token ${GITHUB_TOKEN}`,
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'CloudflareWorkerBot/1.0'
-          }
-        });
-        if (res.ok || res.status === 404) {
-          await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
-          deleted++;
-        }
-      } catch (err) { console.error(err); }
-    }
-    return new Response(JSON.stringify({ deleted }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    const result = await cleanupExpiredBranches(env);
+    return new Response(JSON.stringify(result), { status: 200, headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     console.error('Cleanup error:', err);
     return new Response('Error', { status: 500 });
@@ -285,6 +319,21 @@ async function getFileSize(url) {
     const size = head.headers.get('content-length');
     return size ? parseInt(size) : null;
   } catch { return null; }
+}
+
+// ========== دستور مدیریتی تبدیل کاربر به Pro ==========
+async function adminPromoteToPro(env, chatId, targetChatId, adminSecret, providedSecret, TOKEN) {
+  if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
+  // بررسی وجود کاربر هدف در جدول users
+  const userExists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetChatId).first();
+  if (!userExists) return "❌ کاربر مورد نظر یافت نشد. ممکن است هنوز ربات را استارت نکرده باشد.";
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = now + (30 * 24 * 60 * 60);
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(targetChatId, expiresAt, `admin_${Date.now()}`, now).run();
+  return `✅ کاربر ${targetChatId} با موفقیت به عضویت Pro درآمد. اشتراک تا ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')} معتبر است.`;
 }
 
 export default {
@@ -352,6 +401,8 @@ export default {
 
         const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
         await dbIncrementLinks(env, volumeGB);
+        // افزایش شمارش روزانه
+        await incrementDailyLimit(env, chatId);
 
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۱ روز" : "۱ ساعت";
@@ -422,20 +473,22 @@ export default {
               `⭐️ <b>عضویت Pro</b>\n` +
               `• فایل‌های شما تا <b>۱ روز</b> روی سرور می‌ماند (عادی ۱ ساعت)\n` +
               `• اولویت بالاتر در صف پردازش\n` +
+              `• حداکثر <b>۵ فایل در روز</b> (عادی ۱ فایل در روز)\n` +
               `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
               `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
               `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
               `• فایل ZIP دانلود شده را با <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
               `• داخل پوشه استخراج شده، فایل‌هایی با پسوند <code>.001</code>، <code>.002</code> و ... می‌بینید.\n` +
               `• روی فایل <b>archive.7z.001</b> کلیک کرده و گزینه <b>Extract Here</b> (یا استخراج در اینجا) را انتخاب کنید.\n` +
-              `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را با همان فرمت اولیه تحویل می‌دهد.\n\n` +
-              `⚠️ <b>توجه امنیتی:</b>\n` +
-              `• فایل‌ها در یک مخزن <b>عمومی</b> گیت‌هاب ذخیره می‌شوند. با وجود رمزنگاری ZIP، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
+              `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را تحویل می‌دهد.\n\n` +
+              `⚠️ <b>توجه امنیتی و قانونی:</b>\n` +
+              `• فایل‌ها در یک <b>مخزن عمومی گیت‌هاب</b> ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.\n` +
+              `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b> ربات و توسعه‌دهنده هیچ مسئولیتی در قبال محتوای ارسالی ندارد.\n` +
+              `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران و قوانین بین‌المللی می‌شوید.\n` +
               `• لینک دانلود برای کاربران عادی <b>۱ ساعت</b> و برای کاربران Pro <b>۱ روز</b> معتبر است.\n` +
-              `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n` +
-              `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
+              `• حجم فایل نباید بیشتر از ۲ گیگابایت باشد.\n\n` +
               `❤️ <b>حمایت و پشتیبانی:</b>\n` +
-              `• کانال تلگرام: @maramidownload\n` +
+              `• کانال تلگرام: @maramivpn\n` +
               `• عضو شوید تا از آخرین به‌روزرسانی‌ها و تخفیف‌های ویژه مطلع گردید.\n\n` +
               `📢 ما را به دوستان خود معرفی کنید.`;
             await sendSimple(chatId, helpText, TOKEN);
@@ -454,7 +507,7 @@ export default {
               let warningMsg = '';
               if (repoSize >= REPO_SIZE_LIMIT_GB) warningMsg = '\n\n⚠️ هشدار: حجم مخزن پر است. لطفاً فایل‌های خود را حذف کنید.';
               else if (repoSize >= REPO_SIZE_WARNING_GB) warningMsg = '\n\n⚠️ هشدار: حجم مخزن نزدیک به حد مجاز است. پس از دانلود، فایل خود را حذف کنید.';
-              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n⭐️ کاربران Pro فعال: ${proUsersCount}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount} (${proQueueCount} پرو)\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramidownload`, TOKEN);
+              await sendSimple(chatId, `📊 <b>آمار لحظه‌ای ربات</b>\n\n👥 کاربران کل: ${totalUsers}\n⭐️ کاربران Pro فعال: ${proUsersCount}\n🔄 در حال پردازش: ${activeCount}\n⏳ در صف انتظار: ${queueCount} (${proQueueCount} پرو)\n🔗 لینک‌های ملی ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} گیگابایت${sizeMsg}${warningMsg}\n\n📢 @maramivpn`, TOKEN);
             } catch (err) { console.error(err); await sendSimple(chatId, "⚠️ خطا در دریافت آمار.", TOKEN); }
           }
           else if (data === 'status') {
@@ -533,7 +586,7 @@ export default {
             if (isPro) {
               const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ?').bind(chatId).first();
               const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
-              await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}`, TOKEN);
+              await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز می‌ماند\n• اولویت بالاتر در صف\n• حداکثر ۵ فایل در روز`, TOKEN);
             } else {
               const amountUSD = parseFloat(env.PRO_PRICE) || 5;
               const invoice = await createNowPaymentsInvoice(env, chatId, amountUSD);
@@ -601,6 +654,19 @@ export default {
             }
             return new Response('OK');
           }
+          // دستور جدید: تبدیل کاربر به Pro توسط ادمین
+          if (text.startsWith('/promote')) {
+            const parts = text.split(' ');
+            if (parts.length < 3) {
+              await sendSimple(chatId, "❌ دستور صحیح: /promote <ADMIN_SECRET> <USER_ID>", TOKEN);
+              return new Response('OK');
+            }
+            const secret = parts[1];
+            const targetUserId = parts[2];
+            const result = await adminPromoteToPro(env, chatId, targetUserId, ADMIN_SECRET, secret, TOKEN);
+            await sendSimple(chatId, result, TOKEN);
+            return new Response('OK');
+          }
 
           if (text === '/start') {
             await dbDeleteUserState(env, chatId);
@@ -616,23 +682,35 @@ export default {
               `⭐️ <b>عضویت Pro</b>\n` +
               `• فایل‌های شما تا <b>۱ روز</b> روی سرور می‌ماند (عادی ۱ ساعت)\n` +
               `• اولویت بالاتر در صف پردازش (پروها زودتر از عادی انجام می‌شوند)\n` +
+              `• حداکثر <b>۵ فایل در روز</b> (عادی ۱ فایل در روز)\n` +
               `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
               `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
-              `⚠️ <b>هشدار امنیتی:</b>\n` +
-              `• فایل‌ها در یک <b>مخزن عمومی گیت‌هاب</b> ذخیره می‌شوند. با وجود رمزنگاری، از ارسال فایل‌های شخصی و مهم خودداری کنید.\n` +
+              `⚠️ <b>هشدار امنیتی و قانونی:</b>\n` +
+              `• فایل‌ها در یک <b>مخزن عمومی گیت‌هاب</b> ذخیره می‌شوند. با وجود رمزنگاری، <b>از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.</b>\n` +
+              `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b> ربات و توسعه‌دهنده هیچ مسئولیتی در قبال محتوای ارسالی ندارد.\n` +
+              `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران و قوانین بین‌المللی می‌شوید.\n` +
               `• لینک دانلود برای کاربران عادی <b>۱ ساعت</b> و برای کاربران Pro <b>۱ روز</b> معتبر است.\n` +
               `• پس از دانلود، حتماً روی دکمه <b>«🗑️ حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n` +
               `• از ارسال فایل‌های مستهجن خودداری کنید تا ریپازوتری بن نشود.\n\n` +
               `❤️ <b>حمایت و پشتیبانی:</b>\n` +
-              `• کانال تلگرام: @maramidownload\n` +
+              `• کانال تلگرام: @maramivpn\n` +
               `• عضو شوید تا از آخرین به‌روزرسانی‌ها و تخفیف‌های ویژه مطلع گردید.\n\n` +
               `👇 با دکمه زیر شروع کنید.`;
             await sendMessage(chatId, welcome, MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
-          // دریافت لینک جدید
+          // دریافت لینک جدید (با بررسی محدودیت روزانه)
           if (text.match(/^https?:\/\//)) {
+            // بررسی محدودیت روزانه قبل از هر چیز
+            const isPro = await isProUser(env, chatId);
+            const allowed = await canUpload(env, chatId, isPro);
+            if (!allowed) {
+              const limit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_NORMAL;
+              await sendSimple(chatId, `❌ شما به حداکثر سهمیه روزانه (${limit} فایل) رسیده‌اید. لطفاً فردا دوباره تلاش کنید یا اشتراک Pro تهیه کنید تا سهمیه شما به ${DAILY_LIMIT_PRO} فایل در روز افزایش یابد.`, TOKEN);
+              return new Response('OK');
+            }
+
             const lastBranch = await dbGetLastBranch(env, chatId);
             if (lastBranch) {
               try {
@@ -667,7 +745,7 @@ export default {
             return new Response('OK');
           }
 
-          // رمز عبور
+          // رمز عبور (بدون تغییر)
           const state = await dbGetUserState(env, chatId);
           if (state && state.status === 'awaiting_password' && state.requestData) {
             const password = text;
