@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - رفع خطای Promise
+// ربات دانلودر ملی - نسخه با پشتیبانی از Telegram Stars + NowPayments
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -281,24 +281,25 @@ async function getUserStats(env, chatId) {
   return { total_files: row.total_files, total_volume_gb: row.total_volume_gb };
 }
 
-// ========== توابع Pro و NowPayments ==========
+// ========== توابع Pro (هر دو روش NowPayments و Stars) ==========
 async function isProUser(env, chatId) {
   const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
   return !!row;
 }
-async function activateProSubscription(env, chatId, orderId, amountUSD) {
+async function activateProSubscription(env, chatId, paymentId, amountDesc) {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + (30 * 24 * 60 * 60);
   await env.DB.prepare(`
     INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at)
     VALUES (?, ?, ?, ?)
-  `).bind(chatId, expiresAt, orderId, now).run();
+  `).bind(chatId, expiresAt, paymentId, now).run();
   await sendSimple(chatId, 
-    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountUSD} USD\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n• حداکثر ۵ فایل در روز\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
+    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountDesc}\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n• حداکثر ۵ فایل در روز\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
     env.TELEGRAM_TOKEN
   );
 }
+// ---------- NowPayments ----------
 async function createNowPaymentsInvoice(env, chatId, amountUSD) {
   const orderId = `pro_${chatId}_${Date.now()}`;
   const webhookUrl = `https://telegram-file-bot.gptmoone.workers.dev/api/nowpayments-webhook`;
@@ -326,22 +327,64 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD) {
   }
   return { success: false, error: data };
 }
-async function handleNowPaymentsWebhook(request, env) {
+// ---------- Telegram Stars ----------
+async function createStarsInvoiceLink(env, chatId, starsAmount) {
+  const TOKEN = env.TELEGRAM_TOKEN;
+  const payload = `stars:${chatId}:${Date.now()}`;
+  const url = `https://api.telegram.org/bot${TOKEN}/createInvoiceLink`;
+  const body = {
+    title: "⭐️ اشتراک Pro ربات دانلودر",
+    description: `فعالسازی دسترسی Pro به مدت ۳۰ روز با ${starsAmount} ستاره`,
+    payload: payload,
+    provider_token: "",
+    currency: "XTR",
+    prices: [{ label: "اشتراک ماهانه Pro", amount: starsAmount }]
+  };
   try {
-    const body = await request.json();
-    const paymentStatus = body.payment_status;
-    const orderId = body.order_id;
-    const chatId = orderId.split('_')[1];
-    if (paymentStatus === 'finished') {
-      const amountUSD = body.price_amount || 0;
-      await activateProSubscription(env, chatId, orderId, amountUSD);
-      console.log(`✅ Pro activated for ${chatId}`);
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (data.ok && data.result) {
+      return { success: true, invoiceLink: data.result, payload: payload };
+    } else {
+      console.error('Stars invoice error:', data);
+      return { success: false, error: data.description };
     }
-    return new Response('OK');
   } catch (err) {
-    console.error('Webhook error:', err);
-    return new Response('Error', { status: 500 });
+    return { success: false, error: err.message };
   }
+}
+async function handlePreCheckoutQuery(env, preCheckoutQuery, TOKEN) {
+  const answerUrl = `https://api.telegram.org/bot${TOKEN}/answerPreCheckoutQuery`;
+  try {
+    const res = await fetch(answerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pre_checkout_query_id: preCheckoutQuery.id, ok: true })
+    });
+    return res.ok;
+  } catch (err) {
+    console.error('answerPreCheckoutQuery error:', err);
+    return false;
+  }
+}
+async function handleSuccessfulPayment(env, message, TOKEN) {
+  const chatId = message.chat.id.toString();
+  const payment = message.successful_payment;
+  const payload = payment.invoice_payload;
+  const starsAmount = payment.total_amount / 100; // XTR is in cents? Actually Stars are integer, total_amount is in smallest unit (cents for USD, for XTR it's Stars*100? Let's check. Telegram says for XTR, amount is in Stars, no division needed. But safest: stars = payment.total_amount)
+  // Actually for XTR, total_amount is number of stars (not multiplied by 100). So keep as is.
+  const stars = payment.total_amount;
+  if (payload && payload.startsWith('stars:')) {
+    const parts = payload.split(':');
+    if (parts.length >= 2 && parts[1] === chatId) {
+      await activateProSubscription(env, chatId, `stars_${payment.telegram_payment_charge_id}`, `${stars} ستاره`);
+    } else {
+      console.error(`Payload mismatch: ${payload} vs chat ${chatId}`);
+    }
+  } else {
+    console.log("Unknown payment payload:", payload);
+  }
+  return true;
 }
 
 // ========== پاکسازی خودکار (Cron) ==========
@@ -421,13 +464,8 @@ async function adminFixActive(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const processingCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first())?.count || 0;
   await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
-  await this.finishTask(env);
+  await finishTask(env); // استفاده از تابع سراسری
   return `✅ ${processingCount} رکورد پردازش گیر کرده لغو شد. صف در حال پردازش است.`;
-}
-async function adminStartQueue(env, adminSecret, providedSecret) {
-  if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
-  await this.finishTask(env);
-  return "✅ صف مجدداً راه‌اندازی شد.";
 }
 async function adminAddChannel(env, channelUsername, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
@@ -489,6 +527,23 @@ export default {
     if (path === '/api/cleanup-branches' && request.method === 'POST') {
       return handleCleanupBranches(request, env);
     }
+    if (path === '/api/nowpayments-webhook' && request.method === 'POST') {
+      try {
+        const body = await request.json();
+        const paymentStatus = body.payment_status;
+        const orderId = body.order_id;
+        const chatId = orderId.split('_')[1];
+        if (paymentStatus === 'finished') {
+          const amountUSD = body.price_amount || 0;
+          await activateProSubscription(env, chatId, orderId, `${amountUSD} USD`);
+          console.log(`✅ NowPayments Pro activated for ${chatId}`);
+        }
+        return new Response('OK');
+      } catch (err) {
+        console.error('NowPayments webhook error:', err);
+        return new Response('Error', { status: 500 });
+      }
+    }
     if (path === '/api/started' && request.method === 'POST') {
       try {
         const { user_id } = await request.json();
@@ -543,11 +598,11 @@ export default {
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${sizeText}${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.\n\n${quotaText}`, TOKEN);
 
         await dbDeleteUserState(env, chatId);
-        await this.finishTask(env);
+        await finishTask(env);
         return new Response('OK');
       } catch (err) {
         console.error('Error in /api/complete:', err);
-        await this.finishTask(env).catch(e => console.error(e));
+        await finishTask(env).catch(e => console.error(e));
         return new Response('OK');
       }
     }
@@ -557,7 +612,7 @@ export default {
         if (user_id) {
           const chatId = user_id.split('_')[0];
           await dbDeleteUserState(env, chatId);
-          await this.finishTask(env);
+          await finishTask(env);
           await sendSimple(chatId, "❌ پردازش فایل با خطا مواجه شد. لطفاً دوباره تلاش کنید.", TOKEN);
         }
         return new Response('OK');
@@ -581,6 +636,18 @@ export default {
         const update = await request.json();
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
+
+        // پردازش پیش‌پرداخت (PreCheckoutQuery)
+        if (update.pre_checkout_query) {
+          await handlePreCheckoutQuery(env, update.pre_checkout_query, TOKEN);
+          return new Response('OK');
+        }
+
+        // پردازش پرداخت موفق
+        if (update.message?.successful_payment) {
+          await handleSuccessfulPayment(env, update.message, TOKEN);
+          return new Response('OK');
+        }
 
         // دکمه‌ها
         if (update.callback_query) {
@@ -680,7 +747,37 @@ export default {
             return new Response('OK');
           }
 
-          // دکمه‌های عادی
+          // دکمه Pro: نمایش گزینه‌های پرداخت
+          if (data === 'pro_info') {
+            const isPro = await isProUser(env, chatId);
+            if (isPro) {
+              const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ?').bind(chatId).first();
+              const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
+              await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز می‌ماند\n• اولویت بالاتر در صف\n• حداکثر ۵ فایل در روز`, TOKEN);
+            } else {
+              const starsAmount = 50; // 50 ستاره
+              const starsInvoice = await createStarsInvoiceLink(env, chatId, starsAmount);
+              const cryptoPriceUSD = parseFloat(env.PRO_PRICE) || 5;
+              const cryptoInvoice = await createNowPaymentsInvoice(env, chatId, cryptoPriceUSD);
+              let keyboardRows = [];
+              if (starsInvoice.success) {
+                keyboardRows.push([{ text: "⭐️ خرید با Telegram Stars (50 ستاره)", url: starsInvoice.invoiceLink }]);
+              }
+              if (cryptoInvoice.success) {
+                keyboardRows.push([{ text: "💰 خرید با ارز دیجیتال (TON)", url: cryptoInvoice.invoiceUrl }]);
+              }
+              if (keyboardRows.length === 0) {
+                await sendSimple(chatId, "❌ در حال حاضر روش پرداختی در دسترس نیست. لطفاً بعداً تلاش کنید.", TOKEN);
+              } else {
+                keyboardRows.push([{ text: "🔙 بازگشت", callback_data: "stats" }]);
+                const proKeyboard = { inline_keyboard: keyboardRows };
+                await sendMessage(chatId, `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره (حدود 0.65 دلار)\n• ارز دیجیتال: ${cryptoPriceUSD} USD (معادل TON)\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`, proKeyboard, TOKEN);
+              }
+            }
+            return new Response('OK');
+          }
+
+          // دکمه‌های عادی دیگر
           if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
               `این ربات لینک مستقیم فایل را به لینک قابل دانلود در <b>اینترنت ملی</b> تبدیل می‌کند.\n\n` +
@@ -694,7 +791,7 @@ export default {
               `• فایل‌های شما تا <b>۱ روز</b> روی سرور می‌ماند (عادی ۱ ساعت)\n` +
               `• اولویت بالاتر در صف پردازش\n` +
               `• حداکثر <b>۵ فایل در روز</b> (عادی ۱ فایل در روز)\n` +
-              `• هزینه عضویت: ${env.PRO_PRICE || 5} USD (معادل حدود ${(env.PRO_PRICE || 5)/5} TON)\n` +
+              `• هزینه عضویت: 50 ستاره تلگرام یا معادل 5 دلار ارز دیجیتال\n` +
               `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
               `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
               `• فایل ZIP دانلود شده را با <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
@@ -810,25 +907,6 @@ export default {
             }
             await sendSimple(chatId, "✅ درخواست قبلی لغو شد. اکنون لینک جدید را ارسال کنید.\n(برای لینک مستقیم تلگرام: @filesto_bot)", TOKEN);
           }
-          else if (data === 'pro_info') {
-            const isPro = await isProUser(env, chatId);
-            if (isPro) {
-              const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ?').bind(chatId).first();
-              const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
-              await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز می‌ماند\n• اولویت بالاتر در صف\n• حداکثر ۵ فایل در روز`, TOKEN);
-            } else {
-              const amountUSD = parseFloat(env.PRO_PRICE) || 5;
-              const invoice = await createNowPaymentsInvoice(env, chatId, amountUSD);
-              if (invoice.success) {
-                const proKeyboard = {
-                  inline_keyboard: [[{ text: "💰 پرداخت با ارز دیجیتال", url: invoice.invoiceUrl }], [{ text: "🔙 بازگشت", callback_data: "stats" }]]
-                };
-                await sendMessage(chatId, 
-                  `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه: ${amountUSD} USD\nپس از پرداخت خودکار فعال می‌شود.`,
-                  proKeyboard, TOKEN);
-              } else { await sendSimple(chatId, `❌ خطا در ایجاد فاکتور پرداخت.`, TOKEN); }
-            }
-          }
           return new Response('OK');
         }
 
@@ -873,7 +951,7 @@ export default {
               await env.DB.prepare('DELETE FROM queue').run();
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'waiting').run();
-              await this.finishTask(env);
+              await finishTask(env);
               await sendSimple(chatId, "✅ آمار پردازش‌های فعال و صف بازنشانی شد. صف در حال پردازش است.", TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
@@ -885,7 +963,7 @@ export default {
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
               const processingCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first())?.count || 0;
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
-              await this.finishTask(env);
+              await finishTask(env);
               await sendSimple(chatId, `✅ ${processingCount} رکورد پردازش گیر کرده لغو شد. صف در حال پردازش است.`, TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
@@ -895,7 +973,7 @@ export default {
           if (text.startsWith('/startqueue')) {
             const secret = text.split(' ')[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
-              await this.finishTask(env);
+              await finishTask(env);
               await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
             } else {
               await sendSimple(chatId, "❌ دسترسی غیرمجاز.", TOKEN);
@@ -1006,7 +1084,7 @@ export default {
             const activeCount = await dbGetActiveCount(env);
             if (activeCount < MAX_CONCURRENT) {
               await dbSetUserState(env, chatId, 'processing', { url: fileUrl, password: password, fileSize: fileSize });
-              this.runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
+              runTaskWithRetry(chatId, fileUrl, password, env, TOKEN).catch(e => console.error(e));
               await sendSimple(chatId, "📤 درخواست به گیت‌هاب ارسال شد. منتظر شروع پردازش...", TOKEN);
             } else {
               await dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro);
@@ -1047,7 +1125,7 @@ export default {
     }
     if (!workflowSent) {
       await sendSimple(chatId, "❌ ارسال به گیت‌هاب شکست خورد. لطفاً دوباره تلاش کنید.", TOKEN);
-      await this.finishTask(env);
+      await finishTask(env);
       return;
     }
     let started = false;
@@ -1068,7 +1146,7 @@ export default {
     if (!branch) {
       console.error(`Timeout for ${chatId}`);
       await sendSimple(chatId, `❌ زمان انتظار تمام شد. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
-      await this.finishTask(env);
+      await finishTask(env);
     }
   },
 
@@ -1095,20 +1173,95 @@ export default {
       });
       return res.ok;
     } catch { return false; }
-  },
-
-  async finishTask(env) {
-    const next = await dbPopQueue(env);
-    if (next) {
-      await dbSetUserState(env, next.chatId, 'processing', { url: next.fileUrl, password: next.password, fileSize: next.fileSize });
-      this.runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, this.TOKEN).catch(e => console.error(e));
-      await sendSimple(next.chatId, "🔄 نوبت شما رسید! در حال شروع پردازش فایل...", env.TELEGRAM_TOKEN);
-    }
   }
 };
 
 // ========== توابع کمکی خارج از کلاس ==========
+
+async function finishTask(env) {
+  const next = await dbPopQueue(env);
+  if (next) {
+    await dbSetUserState(env, next.chatId, 'processing', { url: next.fileUrl, password: next.password, fileSize: next.fileSize });
+    runTaskWithRetry(next.chatId, next.fileUrl, next.password, env, env.TELEGRAM_TOKEN).catch(e => console.error(e));
+    await sendSimple(next.chatId, "🔄 نوبت شما رسید! در حال شروع پردازش فایل...", env.TELEGRAM_TOKEN);
+  }
+}
+async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
+  const userId = `${chatId}_${Date.now()}`;
+  let retry = 0;
+  let workflowSent = false;
+  const maxRetries = 1;
+  const retryInterval = 30000;
+  while (retry <= maxRetries && !workflowSent) {
+    const sent = await sendWorkflowRequestDirect(chatId, fileUrl, password, userId, env);
+    if (sent) {
+      workflowSent = true;
+      break;
+    }
+    retry++;
+    if (retry <= maxRetries) {
+      await sendSimple(chatId, `⚠️ تلاش ${retry} ناموفق بود. تلاش مجدد...`, TOKEN);
+      await new Promise(r => setTimeout(r, retryInterval));
+    }
+  }
+  if (!workflowSent) {
+    await sendSimple(chatId, "❌ ارسال به گیت‌هاب شکست خورد. لطفاً دوباره تلاش کنید.", TOKEN);
+    await finishTask(env);
+    return;
+  }
+  let started = false;
+  const maxStartWaitAttempts = 2;
+  const startWaitInterval = 30000;
+  for (let i = 0; i < maxStartWaitAttempts; i++) {
+    await new Promise(r => setTimeout(r, startWaitInterval));
+    const state = await dbGetUserState(env, chatId);
+    if (state && state.startedAt) { started = true; break; }
+  }
+  if (!started) {
+    await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
+  }
+  let branch = null;
+  const maxWaitCycles = 60;
+  const waitInterval = 60000;
+  for (let i = 0; i < maxWaitCycles; i++) {
+    await new Promise(r => setTimeout(r, waitInterval));
+    const state = await dbGetUserState(env, chatId);
+    if (state && state.branchName) { branch = state.branchName; break; }
+  }
+  if (!branch) {
+    console.error(`Timeout for ${chatId}`);
+    await sendSimple(chatId, `❌ زمان انتظار تمام شد. لطفاً بعداً با دکمه «وضعیت من» بررسی کنید.`, TOKEN);
+    await finishTask(env);
+  }
+}
+async function sendWorkflowRequestDirect(chatId, fileUrl, password, userId, env) {
+  const GITHUB_TOKEN = env.GH_TOKEN;
+  const GITHUB_OWNER = 'gptmoone';
+  const GITHUB_REPO = 'telegram-file-downloader';
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'CloudflareWorkerBot/1.0'
+      },
+      body: JSON.stringify({
+        ref: 'main',
+        inputs: {
+          file_url: fileUrl,
+          zip_password: password,
+          user_id: userId
+        }
+      })
+    });
+    return res.ok;
+  } catch { return false; }
+}
 async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
+  const GITHUB_TOKEN = env.GH_TOKEN;
+  const GITHUB_OWNER = 'gptmoone';
+  const GITHUB_REPO = 'telegram-file-downloader';
   const isPro = await isProUser(env, chatId);
   const { allowed, remaining, limit } = await canUpload(env, chatId, isPro);
   if (!allowed) {
