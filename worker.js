@@ -1,13 +1,13 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه کامل (رفع قطعی خطای ادمین)
+// ربات دانلودر ملی - نسخه نهایی با رفع قطعی خطای منوی ادمین
 // ============================================================
 
 // ---------- تنظیمات قابل تغییر ----------
-const STARS_AMOUNT = 60;                 // تعداد ستاره معمولی برای Pro
-const USD_AMOUNT = 1;                    // قیمت دلاری معمولی برای Pro
-const NORMAL_DAILY_VOLUME_MB = 600;      // حداکثر حجم روزانه کاربر عادی (مگابایت)
-const PRO_DAILY_VOLUME_MB = 6144;        // حداکثر حجم روزانه کاربر Pro (6 گیگابایت)
-const BROADCAST_DELAY_MS = 100;          // تأخیر بین ارسال پیام همگانی
+const STARS_AMOUNT = 60;
+const USD_AMOUNT = 1;
+const NORMAL_DAILY_VOLUME_MB = 600;
+const PRO_DAILY_VOLUME_MB = 6144;
+const BROADCAST_DELAY_MS = 100;
 
 // ---------- کیبورد اصلی کاربران ----------
 const MAIN_KEYBOARD = {
@@ -55,7 +55,7 @@ let adminTempState = new Map();
 let broadcastCancelFlag = false;
 
 // ============================================================
-// توابع کمکی عمومی (ارسال پیام، پاسخ به کالبک و...)
+// توابع کمکی عمومی
 // ============================================================
 async function sendMessage(chatId, text, keyboard, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
@@ -72,9 +72,11 @@ async function sendMessage(chatId, text, keyboard, TOKEN) {
     body: JSON.stringify(body)
   });
 }
+
 async function sendSimple(chatId, text, TOKEN) {
   return sendMessage(chatId, text, MAIN_KEYBOARD, TOKEN);
 }
+
 async function answerCallback(callbackId, TOKEN) {
   const url = `https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`;
   try {
@@ -115,14 +117,17 @@ async function ensureGlobalStats(env) {
     await env.DB.prepare('INSERT INTO global_stats (id, total_links, total_volume_gb) VALUES (1, 0, 0)').run();
   }
 }
+
 async function dbGetGlobalStats(env) {
   await ensureGlobalStats(env);
   const row = await env.DB.prepare('SELECT total_links, total_volume_gb FROM global_stats WHERE id = 1').first();
   return { total_links: row?.total_links || 0, total_volume_gb: row?.total_volume_gb || 0 };
 }
+
 async function dbIncrementLinks(env, volumeGB) {
   await env.DB.prepare('UPDATE global_stats SET total_links = total_links + 1, total_volume_gb = total_volume_gb + ? WHERE id = 1').bind(volumeGB).run();
 }
+
 async function dbGetUserState(env, chatId) {
   const row = await env.DB.prepare('SELECT status, request_data, branch_name, started_at, total_chunks, uploaded_chunks FROM user_state WHERE chat_id = ?').bind(chatId).first();
   if (!row) return null;
@@ -135,6 +140,7 @@ async function dbGetUserState(env, chatId) {
     uploadedChunks: row.uploaded_chunks
   };
 }
+
 async function dbSetUserState(env, chatId, status, requestData = null, branchName = null, startedAt = null, totalChunks = null, uploadedChunks = null) {
   const requestDataStr = requestData ? JSON.stringify(requestData) : null;
   await env.DB.prepare(`
@@ -142,9 +148,11 @@ async function dbSetUserState(env, chatId, status, requestData = null, branchNam
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).bind(chatId, status, requestDataStr, branchName, startedAt, totalChunks, uploadedChunks).run();
 }
+
 async function dbDeleteUserState(env, chatId) {
   await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run();
 }
+
 async function dbGetQueueCount(env, onlyPro = false) {
   let sql = 'SELECT COUNT(*) as count FROM queue';
   if (onlyPro) sql += ' WHERE priority = 1';
@@ -152,6 +160,7 @@ async function dbGetQueueCount(env, onlyPro = false) {
   const row = await env.DB.prepare(sql).first();
   return row?.count || 0;
 }
+
 async function dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro = false) {
   const now = Date.now();
   const priority = isPro ? 1 : 0;
@@ -160,6 +169,7 @@ async function dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro = fals
     VALUES (?, ?, ?, ?, ?, ?)
   `).bind(chatId, fileUrl, password, fileSize, now, priority).run();
 }
+
 async function dbPopQueue(env) {
   let row = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size FROM queue WHERE priority = 1 ORDER BY position ASC LIMIT 1').first();
   if (!row) {
@@ -174,35 +184,44 @@ async function dbPopQueue(env) {
     fileSize: row.file_size
   };
 }
+
 async function dbRemoveFromQueue(env, chatId) {
   await env.DB.prepare('DELETE FROM queue WHERE chat_id = ?').bind(chatId).run();
 }
+
 async function dbGetActiveCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first();
   return row?.count || 0;
 }
+
 async function dbGetActiveBranchesCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM active_branches').first();
   return row?.count || 0;
 }
+
 async function dbGetUsersCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM users').first();
   return row?.count || 0;
 }
+
 async function dbAddUser(env, chatId) {
   const now = Date.now();
   await env.DB.prepare('INSERT OR IGNORE INTO users (chat_id, first_seen) VALUES (?, ?)').bind(chatId, now).run();
 }
+
 async function dbAddActiveBranch(env, branchName, chatId, createdAt, expiresAt) {
   await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(branchName, chatId, createdAt, expiresAt).run();
 }
+
 async function dbRemoveActiveBranch(env, branchName) {
   await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branchName).run();
 }
+
 async function dbGetLastBranch(env, chatId) {
   const row = await env.DB.prepare('SELECT branch_name FROM active_branches WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1').bind(chatId).first();
   return row?.branch_name || null;
 }
+
 async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
   const now = Date.now();
   try {
@@ -213,13 +232,14 @@ async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
     throw err;
   }
 }
+
 async function getAllUsers(env) {
   const rows = await env.DB.prepare('SELECT chat_id FROM users').all();
   return rows.results.map(r => r.chat_id);
 }
 
 // ============================================================
-// توابع محدودیت روزانه (حجم و تعداد)
+// توابع محدودیت روزانه
 // ============================================================
 async function getDailyLimit(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
@@ -232,6 +252,7 @@ async function getDailyLimit(env, chatId) {
   const dailyVolumeBytes = typeof row.daily_volume_bytes === 'number' ? row.daily_volume_bytes : 0;
   return { fileCount, resetDate: row.reset_date, dailyVolumeBytes };
 }
+
 async function incrementDailyLimit(env, chatId, addedVolumeBytes) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
   await env.DB.prepare(`
@@ -244,6 +265,7 @@ async function incrementDailyLimit(env, chatId, addedVolumeBytes) {
     WHERE daily_limits.reset_date >= ?
   `).bind(chatId, todayStart, addedVolumeBytes, todayStart).run();
 }
+
 async function canUploadByVolume(env, chatId, fileSizeBytes, isPro) {
   const { dailyVolumeBytes } = await getDailyLimit(env, chatId);
   const limitBytes = isPro ? DAILY_VOLUME_PRO_BYTES : DAILY_VOLUME_NORMAL_BYTES;
@@ -252,16 +274,19 @@ async function canUploadByVolume(env, chatId, fileSizeBytes, isPro) {
   const remainingBytes = Math.max(0, limitBytes - dailyVolumeBytes);
   return { allowed, remainingBytes, newTotal, limitBytes };
 }
+
 async function canUpload(env, chatId, isPro) {
   const { fileCount } = await getDailyLimit(env, chatId);
   const limit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_NORMAL;
   const remaining = Math.max(0, limit - fileCount);
   return { allowed: remaining > 0, current: fileCount, limit, remaining };
 }
+
 async function resetUserQuota(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
   await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date, daily_volume_bytes) VALUES (?, 0, ?, 0)').bind(chatId, todayStart).run();
 }
+
 async function getRemainingQuotaText(env, chatId, isPro) {
   const { remaining, limit } = await canUpload(env, chatId, isPro);
   const { remainingBytes } = await canUploadByVolume(env, chatId, 0, isPro);
@@ -278,11 +303,15 @@ async function getRequiredChannels(env) {
   if (!row) return [];
   try {
     return JSON.parse(row.channels);
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
+
 async function setRequiredChannels(env, channelsArray) {
   await env.DB.prepare('INSERT OR REPLACE INTO required_channels (id, channels) VALUES (1, ?)').bind(JSON.stringify(channelsArray)).run();
 }
+
 async function isUserMemberOfChannels(chatId, channels, TOKEN) {
   if (!channels || channels.length === 0) return true;
   for (const channelUsername of channels) {
@@ -293,14 +322,18 @@ async function isUserMemberOfChannels(chatId, channels, TOKEN) {
       if (!data.ok || !data.result || (data.result.status !== 'member' && data.result.status !== 'creator' && data.result.status !== 'administrator')) {
         return false;
       }
-    } catch (e) { return false; }
+    } catch (e) {
+      return false;
+    }
   }
   return true;
 }
+
 async function savePendingLink(env, chatId, fileUrl, fileSize) {
   const now = Date.now();
   await env.DB.prepare('INSERT OR REPLACE INTO pending_links (chat_id, file_url, file_size, timestamp) VALUES (?, ?, ?, ?)').bind(chatId, fileUrl, fileSize, now).run();
 }
+
 async function getPendingLink(env, chatId) {
   const row = await env.DB.prepare('SELECT file_url, file_size FROM pending_links WHERE chat_id = ?').bind(chatId).first();
   if (!row) return null;
@@ -321,6 +354,7 @@ async function incrementUserStats(env, chatId, fileSizeBytes) {
       total_volume_gb = total_volume_gb + excluded.total_volume_gb
   `).bind(chatId, volumeGB).run();
 }
+
 async function getUserStats(env, chatId) {
   const row = await env.DB.prepare('SELECT total_files, total_volume_gb FROM user_stats WHERE chat_id = ?').bind(chatId).first();
   if (!row) return { total_files: 0, total_volume_gb: 0 };
@@ -328,13 +362,14 @@ async function getUserStats(env, chatId) {
 }
 
 // ============================================================
-// توابع Pro (NowPayments + Telegram Stars)
+// توابع Pro و تخفیف
 // ============================================================
 async function isProUser(env, chatId) {
   const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
   return !!row;
 }
+
 async function activateProSubscription(env, chatId, paymentId, amountDesc) {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + (30 * 24 * 60 * 60);
@@ -347,7 +382,8 @@ async function activateProSubscription(env, chatId, paymentId, amountDesc) {
     env.TELEGRAM_TOKEN
   );
 }
-// ---------- توابع تخفیف (هر دو روش) ----------
+
+// --- توابع تخفیف (هر دو روش) ---
 async function getDiscountSettings(env) {
   const row = await env.DB.prepare('SELECT active, stars_price, usd_price, expires_at FROM discount_settings WHERE id = 1').first();
   if (!row || row.active !== 1) return null;
@@ -358,6 +394,7 @@ async function getDiscountSettings(env) {
   }
   return { starsPrice: row.stars_price, usdPrice: row.usd_price, expiresAt: row.expires_at };
 }
+
 async function setDiscount(env, starsPrice, usdPrice, durationHours) {
   const expiresAt = Math.floor(Date.now() / 1000) + (durationHours * 3600);
   await env.DB.prepare(`
@@ -365,10 +402,12 @@ async function setDiscount(env, starsPrice, usdPrice, durationHours) {
     VALUES (1, 1, ?, ?, ?)
   `).bind(starsPrice, usdPrice, expiresAt).run();
 }
+
 async function clearDiscount(env) {
   await env.DB.prepare('UPDATE discount_settings SET active = 0 WHERE id = 1').run();
 }
-// ---------- NowPayments (ارز دیجیتال) ----------
+
+// --- NowPayments (ارز دیجیتال) ---
 async function createNowPaymentsInvoice(env, chatId, amountUSD) {
   const orderId = `pro_${chatId}_${Date.now()}`;
   const webhookUrl = `https://telegram-file-bot.gptmoone.workers.dev/api/nowpayments-webhook`;
@@ -396,7 +435,8 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD) {
   }
   return { success: false, error: data };
 }
-// ---------- Telegram Stars ----------
+
+// --- Telegram Stars ---
 async function createStarsInvoiceLink(env, chatId, starsAmount) {
   const TOKEN = env.TELEGRAM_TOKEN;
   const payload = `stars:${chatId}:${Date.now()}`;
@@ -410,7 +450,11 @@ async function createStarsInvoiceLink(env, chatId, starsAmount) {
     prices: [{ label: "Monthly Pro", amount: starsAmount }]
   };
   try {
-    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
     const data = await res.json();
     if (data.ok && data.result) {
       return { success: true, invoiceLink: data.result, payload: payload };
@@ -422,6 +466,7 @@ async function createStarsInvoiceLink(env, chatId, starsAmount) {
     return { success: false, error: err.message };
   }
 }
+
 async function handlePreCheckoutQuery(env, preCheckoutQuery, TOKEN) {
   const answerUrl = `https://api.telegram.org/bot${TOKEN}/answerPreCheckoutQuery`;
   try {
@@ -436,6 +481,7 @@ async function handlePreCheckoutQuery(env, preCheckoutQuery, TOKEN) {
     return false;
   }
 }
+
 async function handleSuccessfulPayment(env, message, TOKEN) {
   const chatId = message.chat.id.toString();
   const payment = message.successful_payment;
@@ -455,7 +501,7 @@ async function handleSuccessfulPayment(env, message, TOKEN) {
 }
 
 // ============================================================
-// پاکسازی خودکار برنچ‌های منقضی شده (Cron)
+// پاکسازی خودکار (Cron)
 // ============================================================
 async function cleanupExpiredBranches(env) {
   const GITHUB_TOKEN = env.GH_TOKEN;
@@ -478,10 +524,13 @@ async function cleanupExpiredBranches(env) {
         await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branch.branch_name).run();
         deleted++;
       }
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      console.error(err);
+    }
   }
   return { deleted };
 }
+
 async function handleCleanupBranches(request, env) {
   try {
     const { secret } = await request.json();
@@ -542,13 +591,17 @@ async function getBranchTotalSize(env, branchName) {
   }
   return totalSize;
 }
+
 async function getFileSize(url) {
   try {
     const head = await fetch(url, { method: 'HEAD' });
     const size = head.headers.get('content-length');
     return size ? parseInt(size) : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
+
 async function deleteBranchFromGitHub(env, branchName) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
@@ -570,7 +623,7 @@ async function deleteBranchFromGitHub(env, branchName) {
 }
 
 // ============================================================
-// دستورات ادمین (عملیات مدیریتی کامل)
+// دستورات ادمین (عملیات مدیریتی)
 // ============================================================
 async function adminPromoteToPro(env, targetUserId, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
@@ -584,6 +637,7 @@ async function adminPromoteToPro(env, targetUserId, adminSecret, providedSecret)
   `).bind(targetUserId, expiresAt, `admin_${Date.now()}`, now).run();
   return `✅ کاربر ${targetUserId} با موفقیت به عضویت Pro درآمد. اشتراک تا ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')} معتبر است.`;
 }
+
 async function adminResetQuota(env, targetUserId, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const userExists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetUserId).first();
@@ -591,11 +645,13 @@ async function adminResetQuota(env, targetUserId, adminSecret, providedSecret) {
   await resetUserQuota(env, targetUserId);
   return `✅ سهمیه روزانه کاربر ${targetUserId} با موفقیت بازنشانی شد.`;
 }
+
 async function adminResetQueue(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   await env.DB.prepare('DELETE FROM queue').run();
   return "✅ صف با موفقیت خالی شد (پردازش‌های جاری دست نخورده).";
 }
+
 async function adminFixActive(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const processingCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first())?.count || 0;
@@ -603,6 +659,7 @@ async function adminFixActive(env, adminSecret, providedSecret) {
   await finishTask(env);
   return `✅ ${processingCount} رکورد پردازش گیر کرده لغو شد. صف در حال پردازش است.`;
 }
+
 async function adminAddChannel(env, channelUsername, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   let channels = await getRequiredChannels(env);
@@ -613,6 +670,7 @@ async function adminAddChannel(env, channelUsername, adminSecret, providedSecret
   await setRequiredChannels(env, channels);
   return `✅ کانال @${clean} با موفقیت به لیست عضویت اجباری اضافه شد.`;
 }
+
 async function adminRemoveChannel(env, channelUsername, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   let channels = await getRequiredChannels(env);
@@ -622,11 +680,13 @@ async function adminRemoveChannel(env, channelUsername, adminSecret, providedSec
   await setRequiredChannels(env, channels);
   return `✅ کانال @${clean} از لیست عضویت اجباری حذف شد.`;
 }
+
 async function adminRemoveAllChannels(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   await setRequiredChannels(env, []);
   return "✅ تمام کانال‌های اجباری با موفقیت حذف شدند.";
 }
+
 async function adminShowChannels(env, chatId, adminSecret, providedSecret, TOKEN) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   let channels = await getRequiredChannels(env);
@@ -647,7 +707,7 @@ async function adminShowChannels(env, chatId, adminSecret, providedSecret, TOKEN
 }
 
 // ============================================================
-// ارسال پیام همگانی (Broadcast) با قابلیت لغو
+// ارسال پیام همگانی (Broadcast)
 // ============================================================
 async function startBroadcast(env, adminChatId, messageText, TOKEN) {
   const users = await getAllUsers(env);
@@ -694,9 +754,8 @@ async function startBroadcast(env, adminChatId, messageText, TOKEN) {
   await sendSimple(adminChatId, `✅ ارسال پیام همگانی پایان یافت.\nموفق: ${successCount}\nناموفق: ${failCount}`, TOKEN);
 }
 
-
 // ============================================================
-// تابع اصلی fetch و مدیریت وب‌هوک تلگرام
+// تابع اصلی fetch و وب‌هوک
 // ============================================================
 export default {
   async fetch(request, env) {
@@ -846,10 +905,12 @@ export default {
     if (path === `/bot${TOKEN}` && request.method === 'POST') {
       try {
         const update = await request.json();
+        
+        // اضافه کردن کاربر به دیتابیس
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
-        // دستور لغو broadcast (فقط برای ادمین)
+        // دستور لغو broadcast
         if (update.message?.text === '/cancel_broadcast' && update.message.chat.id.toString() === ADMIN_CHAT_ID) {
           broadcastCancelFlag = true;
           await sendSimple(ADMIN_CHAT_ID, "⛔ درخواست لغو ارسال همگانی ثبت شد.", TOKEN);
@@ -907,7 +968,7 @@ export default {
             return new Response('OK');
           }
 
-          // دکمه تخفیف جداگانه (در پیام همگانی)
+          // دکمه تخفیف جداگانه
           if (data === 'discount_pro') {
             const isPro = await isProUser(env, chatId);
             if (isPro) {
@@ -1011,7 +1072,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---------- دکمه Pro عادی (با احتساب تخفیف اگر فعال باشد) ----------
+          // ---------- دکمه Pro عادی ----------
           if (data === 'pro_info') {
             const isPro = await isProUser(env, chatId);
             if (isPro) {
@@ -1048,7 +1109,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---------- دکمه راهنما (کامل) ----------
+          // ---------- دکمه راهنما ----------
           if (data === 'help') {
             const helpText = `📘 <b>راهنمای ربات</b>\n\n` +
               `این ربات لینک مستقیم فایل را به لینک قابل دانلود در <b>اینترنت ملی</b> تبدیل می‌کند.\n\n` +
@@ -1194,12 +1255,12 @@ export default {
           return new Response('OK');
         }
 
-        // ---------- پیام متنی (با اولویت وضعیت موقت ادمین) ----------
+        // ---------- پیام متنی ----------
         if (update.message?.text) {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
 
-          // ========== اولویت 1: وضعیت موقت ادمین (قبل از هر چیز دیگر) ==========
+          // ========== اولویت 1: وضعیت موقت ادمین (بالاترین اولویت) ==========
           if (adminTempState.has(chatId) && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             const state = adminTempState.get(chatId);
 
@@ -1210,10 +1271,11 @@ export default {
                 await sendSimple(chatId, "❌ لطفاً یک عدد صحیح مثبت (ساعت) وارد کنید. مثال: 24", TOKEN);
                 return new Response('OK');
               }
-              adminTempState.set(chatId, { step: 'awaiting_discount_stars', hours });
+              adminTempState.set(chatId, { step: 'awaiting_discount_stars', hours: hours });
               await sendSimple(chatId, `✅ مدت تخفیف ${hours} ساعت تنظیم شد.\n⭐️ حالا تعداد ستاره تخفیفی را وارد کنید (عدد صحیح):`, TOKEN);
               return new Response('OK');
             }
+            
             // مرحله تنظیم تخفیف - دریافت ستاره تخفیفی
             if (state.step === 'awaiting_discount_stars') {
               const starsPrice = parseInt(text);
@@ -1221,10 +1283,11 @@ export default {
                 await sendSimple(chatId, "❌ لطفاً یک عدد صحیح مثبت (ستاره) وارد کنید. مثال: 40", TOKEN);
                 return new Response('OK');
               }
-              adminTempState.set(chatId, { step: 'awaiting_discount_usd', starsPrice, hours: state.hours });
+              adminTempState.set(chatId, { step: 'awaiting_discount_usd', starsPrice: starsPrice, hours: state.hours });
               await sendSimple(chatId, `⭐️ قیمت ستاره تخفیفی: ${starsPrice} تنظیم شد.\n💰 حالا قیمت دلاری تخفیفی را وارد کنید (مثال: 0.7):`, TOKEN);
               return new Response('OK');
             }
+            
             // مرحله تنظیم تخفیف - دریافت دلار تخفیفی
             if (state.step === 'awaiting_discount_usd') {
               const usdPrice = parseFloat(text);
@@ -1287,9 +1350,10 @@ export default {
             adminTempState.delete(chatId);
           }
 
-          // ========== اولویت 2: دستورات ادمین (متن محور) ==========
-          if (text.startsWith('/resetstats')) {
-            const secret = text.split(' ')[1];
+          // ========== اولویت 2: دستورات ادمین (متن‌محور) ==========
+          const resetstatsMatch = text.match(/^\/resetstats (.+)$/);
+          if (resetstatsMatch) {
+            const secret = resetstatsMatch[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
               await env.DB.prepare('DELETE FROM queue').run();
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
@@ -1301,8 +1365,10 @@ export default {
             }
             return new Response('OK');
           }
-          if (text.startsWith('/fixactive')) {
-            const secret = text.split(' ')[1];
+
+          const fixactiveMatch = text.match(/^\/fixactive (.+)$/);
+          if (fixactiveMatch) {
+            const secret = fixactiveMatch[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
               const processingCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first())?.count || 0;
               await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
@@ -1313,8 +1379,10 @@ export default {
             }
             return new Response('OK');
           }
-          if (text.startsWith('/startqueue')) {
-            const secret = text.split(' ')[1];
+
+          const startqueueMatch = text.match(/^\/startqueue (.+)$/);
+          if (startqueueMatch) {
+            const secret = startqueueMatch[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
               await finishTask(env);
               await sendSimple(chatId, "✅ صف مجدداً راه‌اندازی شد.", TOKEN);
@@ -1323,8 +1391,10 @@ export default {
             }
             return new Response('OK');
           }
-          if (text.startsWith('/resetqueue')) {
-            const secret = text.split(' ')[1];
+
+          const resetqueueMatch = text.match(/^\/resetqueue (.+)$/);
+          if (resetqueueMatch) {
+            const secret = resetqueueMatch[1];
             if (ADMIN_SECRET && secret === ADMIN_SECRET) {
               await env.DB.prepare('DELETE FROM queue').run();
               await sendSimple(chatId, "✅ صف با موفقیت خالی شد (پردازش‌های جاری دست نخورده).", TOKEN);
@@ -1333,30 +1403,25 @@ export default {
             }
             return new Response('OK');
           }
-          if (text.startsWith('/promote')) {
-            const parts = text.split(' ');
-            if (parts.length < 3) {
-              await sendSimple(chatId, "❌ دستور صحیح: /promote <ADMIN_SECRET> <USER_ID>", TOKEN);
-              return new Response('OK');
-            }
-            const secret = parts[1];
-            const targetUserId = parts[2];
+
+          const promoteMatch = text.match(/^\/promote (.+) (.+)$/);
+          if (promoteMatch) {
+            const secret = promoteMatch[1];
+            const targetUserId = promoteMatch[2];
             const result = await adminPromoteToPro(env, targetUserId, ADMIN_SECRET, secret);
             await sendSimple(chatId, result, TOKEN);
             return new Response('OK');
           }
-          if (text.startsWith('/resetquota')) {
-            const parts = text.split(' ');
-            if (parts.length < 3) {
-              await sendSimple(chatId, "❌ دستور صحیح: /resetquota <ADMIN_SECRET> <USER_ID>", TOKEN);
-              return new Response('OK');
-            }
-            const secret = parts[1];
-            const targetUserId = parts[2];
+
+          const resetquotaMatch = text.match(/^\/resetquota (.+) (.+)$/);
+          if (resetquotaMatch) {
+            const secret = resetquotaMatch[1];
+            const targetUserId = resetquotaMatch[2];
             const result = await adminResetQuota(env, targetUserId, ADMIN_SECRET, secret);
             await sendSimple(chatId, result, TOKEN);
             return new Response('OK');
           }
+
           if (text === '/myid') {
             await sendSimple(chatId, `🆔 شناسه چت (Chat ID) شما: <code>${chatId}</code>`, TOKEN);
             return new Response('OK');
@@ -1417,11 +1482,11 @@ export default {
           }
 
           // ========== اولویت 5: دریافت رمز عبور ==========
-          const state = await dbGetUserState(env, chatId);
-          if (state && state.status === 'awaiting_password' && state.requestData) {
+          const userState = await dbGetUserState(env, chatId);
+          if (userState && userState.status === 'awaiting_password' && userState.requestData) {
             const password = text;
-            const fileUrl = state.requestData.url;
-            const fileSize = state.requestData.fileSize || 0;
+            const fileUrl = userState.requestData.url;
+            const fileSize = userState.requestData.fileSize || 0;
             const isPro = await isProUser(env, chatId);
             await dbDeleteUserState(env, chatId);
             const activeCount = await dbGetActiveCount(env);
@@ -1477,7 +1542,10 @@ export default {
     for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, START_WAIT_INTERVAL));
       const state = await dbGetUserState(env, chatId);
-      if (state && state.startedAt) { started = true; break; }
+      if (state && state.startedAt) {
+        started = true;
+        break;
+      }
     }
     if (!started) {
       await sendSimple(chatId, "⚠️ پردازش شروع نشد. ممکن است سرور شلوغ باشد. با دکمه «وضعیت من» بعداً پیگیری کنید.", TOKEN);
@@ -1486,7 +1554,10 @@ export default {
     for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
       await new Promise(r => setTimeout(r, WAIT_INTERVAL));
       const state = await dbGetUserState(env, chatId);
-      if (state && state.branchName) { branch = state.branchName; break; }
+      if (state && state.branchName) {
+        branch = state.branchName;
+        break;
+      }
     }
     if (!branch) {
       console.error(`Timeout for ${chatId}`);
@@ -1517,12 +1588,14 @@ export default {
         })
       });
       return res.ok;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   }
 };
 
 // ============================================================
-// توابع کمکی خارج از کلاس (برای تکمیل)
+// توابع کمکی خارج از کلاس
 // ============================================================
 async function finishTask(env) {
   const next = await dbPopQueue(env);
@@ -1532,6 +1605,7 @@ async function finishTask(env) {
     await sendSimple(next.chatId, "🔄 نوبت شما رسید! در حال شروع پردازش فایل...", env.TELEGRAM_TOKEN);
   }
 }
+
 async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
   const userId = `${chatId}_${Date.now()}`;
   let retry = 0;
@@ -1540,7 +1614,10 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
   const retryInterval = 30000;
   while (retry <= maxRetries && !workflowSent) {
     const sent = await sendWorkflowRequestDirect(chatId, fileUrl, password, userId, env);
-    if (sent) { workflowSent = true; break; }
+    if (sent) {
+      workflowSent = true;
+      break;
+    }
     retry++;
     if (retry <= maxRetries) {
       await sendSimple(chatId, `⚠️ تلاش ${retry} ناموفق بود. تلاش مجدد...`, TOKEN);
@@ -1575,6 +1652,7 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
     await finishTask(env);
   }
 }
+
 async function sendWorkflowRequestDirect(chatId, fileUrl, password, userId, env) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
@@ -1599,6 +1677,7 @@ async function sendWorkflowRequestDirect(chatId, fileUrl, password, userId, env)
     return res.ok;
   } catch { return false; }
 }
+
 async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
@@ -1658,6 +1737,7 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
   const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
   await sendMessage(chatId, `✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n\n${quotaMsg}`, cancelKeyboard, TOKEN);
 }
+
 function getMainKeyboardForAdmin(adminChatId, currentChatId) {
   let keyboard = {
     inline_keyboard: [
@@ -1672,16 +1752,3 @@ function getMainKeyboardForAdmin(adminChatId, currentChatId) {
   }
   return keyboard;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
