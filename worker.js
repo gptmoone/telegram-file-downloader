@@ -1,5 +1,5 @@
 // ==========================================
-// ربات دانلودر ملی - نسخه با پشتیبانی از Telegram Stars + NowPayments
+// ربات دانلودر ملی - نسخه با محاسبه دقیق حجم از روی گیت‌هاب
 // ==========================================
 
 const MAIN_KEYBOARD = {
@@ -333,12 +333,12 @@ async function createStarsInvoiceLink(env, chatId, starsAmount) {
   const payload = `stars:${chatId}:${Date.now()}`;
   const url = `https://api.telegram.org/bot${TOKEN}/createInvoiceLink`;
   const body = {
-    title: "⭐️ اشتراک Pro ربات دانلودر",
-    description: `فعالسازی دسترسی Pro به مدت ۳۰ روز با ${starsAmount} ستاره`,
+    title: "Pro Subscription",
+    description: `Access for 30 days (${starsAmount} Stars)`,
     payload: payload,
     provider_token: "",
     currency: "XTR",
-    prices: [{ label: "اشتراک ماهانه Pro", amount: starsAmount }]
+    prices: [{ label: "Monthly Pro", amount: starsAmount }]
   };
   try {
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -371,8 +371,6 @@ async function handleSuccessfulPayment(env, message, TOKEN) {
   const chatId = message.chat.id.toString();
   const payment = message.successful_payment;
   const payload = payment.invoice_payload;
-  const starsAmount = payment.total_amount / 100; // XTR is in cents? Actually Stars are integer, total_amount is in smallest unit (cents for USD, for XTR it's Stars*100? Let's check. Telegram says for XTR, amount is in Stars, no division needed. But safest: stars = payment.total_amount)
-  // Actually for XTR, total_amount is number of stars (not multiplied by 100). So keep as is.
   const stars = payment.total_amount;
   if (payload && payload.startsWith('stars:')) {
     const parts = payload.split(':');
@@ -427,6 +425,52 @@ async function handleCleanupBranches(request, env) {
   }
 }
 
+// ========== تابع جدید: گرفتن حجم واقعی برنچ از گیت‌هاب ==========
+async function getBranchTotalSize(env, branchName) {
+  const GITHUB_TOKEN = env.GH_TOKEN;
+  const GITHUB_OWNER = 'gptmoone';
+  const GITHUB_REPO = 'telegram-file-downloader';
+  let totalSize = 0;
+  let page = 1;
+  const perPage = 100;
+  let hasMore = true;
+  while (hasMore) {
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/trees/${branchName}?recursive=1&per_page=${perPage}`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'Authorization': `token ${GITHUB_TOKEN}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'CloudflareWorkerBot/1.0'
+        }
+      });
+      if (!res.ok) {
+        console.error(`GitHub tree API failed: ${res.status}`);
+        return null;
+      }
+      const data = await res.json();
+      if (data.tree && Array.isArray(data.tree)) {
+        for (const item of data.tree) {
+          if (item.type === 'blob' && item.size) {
+            totalSize += item.size;
+          }
+        }
+      }
+      // پشتیبانی از pagination (اگر تعداد فایل‌ها بیشتر از perPage باشد)
+      if (data.truncated && data.next) {
+        page++;
+        continue;
+      } else {
+        hasMore = false;
+      }
+    } catch (err) {
+      console.error('getBranchTotalSize error:', err);
+      return null;
+    }
+  }
+  return totalSize;
+}
+
 async function getFileSize(url) {
   try {
     const head = await fetch(url, { method: 'HEAD' });
@@ -464,7 +508,7 @@ async function adminFixActive(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const processingCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first())?.count || 0;
   await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
-  await finishTask(env); // استفاده از تابع سراسری
+  await finishTask(env);
   return `✅ ${processingCount} رکورد پردازش گیر کرده لغو شد. صف در حال پردازش است.`;
 }
 async function adminAddChannel(env, channelUsername, adminSecret, providedSecret) {
@@ -578,21 +622,37 @@ export default {
         await dbSetBranchForUser(env, chatId, branch, expiresAt);
         await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
 
-        const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
-        let fileSizeBytes = 0, password = '';
-        if (reqRow && reqRow.request_data) {
-          const req = JSON.parse(reqRow.request_data);
-          fileSizeBytes = req.fileSize || 0;
-          password = req.password || '';
+        // محاسبه حجم واقعی فایل از روی برنچ گیت‌هاب
+        let totalSizeBytes = await getBranchTotalSize(env, branch);
+        let volumeGB = 0;
+        if (totalSizeBytes && totalSizeBytes > 0) {
+          volumeGB = totalSizeBytes / (1024 * 1024 * 1024);
+          console.log(`Branch ${branch} total size: ${totalSizeBytes} bytes (${volumeGB.toFixed(4)} GB)`);
+        } else {
+          // fallback به حجم ذخیره شده در request_data (اگر وجود داشت)
+          const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
+          if (reqRow && reqRow.request_data) {
+            const req = JSON.parse(reqRow.request_data);
+            const fileSizeBytes = req.fileSize || 0;
+            volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
+          }
         }
-        const volumeGB = fileSizeBytes / (1024 * 1024 * 1024);
+        // افزایش حجم کل دانلود شده (حتی اگر صفر باشه تأثیری نداره)
         await dbIncrementLinks(env, volumeGB);
         await incrementDailyLimit(env, chatId);
-        await incrementUserStats(env, chatId, fileSizeBytes);
+        await incrementUserStats(env, chatId, totalSizeBytes || 0);
+
+        // گرفتن رمز عبور از request_data برای نمایش
+        const reqRow2 = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
+        let password = '';
+        if (reqRow2 && reqRow2.request_data) {
+          const req = JSON.parse(reqRow2.request_data);
+          password = req.password || '';
+        }
 
         const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
         const validityMsg = isPro ? "۱ روز" : "۱ ساعت";
-        const sizeText = fileSizeBytes ? `\n📦 حجم فایل: ${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB` : '';
+        const sizeText = totalSizeBytes ? `\n📦 حجم فایل: ${(totalSizeBytes / (1024 * 1024)).toFixed(2)} MB` : '';
         const helpExtract = `\n\n📌 <b>نحوه استخراج فایل:</b>\nپس از دانلود فایل ZIP، با 7-Zip یا WinRAR فایل archive.7z.001 را استخراج کنید.`;
         const quotaText = await getRemainingQuotaText(env, chatId, isPro);
         await sendSimple(chatId, `✅ <b>فایل شما آماده شد!</b>\n\n🔗 لینک دانلود (${validityMsg} معتبر):\n${link}\n\n⚠️ رمز عبور: <code>${password}</code>${sizeText}${helpExtract}\n\n🗑️ پس از دانلود، با دکمه «حذف فایل من» فایل را از سرور پاک کنید.\n\n${quotaText}`, TOKEN);
@@ -755,13 +815,13 @@ export default {
               const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
               await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز می‌ماند\n• اولویت بالاتر در صف\n• حداکثر ۵ فایل در روز`, TOKEN);
             } else {
-              const starsAmount = 60; // 50 ستاره
+              const starsAmount = 60; // مقدار ستاره به دلخواه (تغییر دهید)
               const starsInvoice = await createStarsInvoiceLink(env, chatId, starsAmount);
               const cryptoPriceUSD = parseFloat(env.PRO_PRICE) || 1;
               const cryptoInvoice = await createNowPaymentsInvoice(env, chatId, cryptoPriceUSD);
               let keyboardRows = [];
               if (starsInvoice.success) {
-                keyboardRows.push([{ text: "⭐️ خرید با Telegram Stars (60 ستاره)", url: starsInvoice.invoiceLink }]);
+                keyboardRows.push([{ text: `⭐️ خرید با Telegram Stars (${starsAmount} ستاره)`, url: starsInvoice.invoiceLink }]);
               }
               if (cryptoInvoice.success) {
                 keyboardRows.push([{ text: "💰 خرید با ارز دیجیتال (TON)", url: cryptoInvoice.invoiceUrl }]);
@@ -771,7 +831,7 @@ export default {
               } else {
                 keyboardRows.push([{ text: "🔙 بازگشت", callback_data: "stats" }]);
                 const proKeyboard = { inline_keyboard: keyboardRows };
-                await sendMessage(chatId, `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره \n• ارز دیجیتال: ${cryptoPriceUSD} USD (معادل TON)\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`, proKeyboard, TOKEN);
+                await sendMessage(chatId, `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره (حدود ${(starsAmount * 0.013).toFixed(2)} دلار)\n• ارز دیجیتال: ${cryptoPriceUSD} USD (معادل TON)\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`, proKeyboard, TOKEN);
               }
             }
             return new Response('OK');
@@ -791,7 +851,7 @@ export default {
               `• فایل‌های شما تا <b>۱ روز</b> روی سرور می‌ماند (عادی ۱ ساعت)\n` +
               `• اولویت بالاتر در صف پردازش\n` +
               `• حداکثر <b>۵ فایل در روز</b> (عادی ۱ فایل در روز)\n` +
-              `• هزینه عضویت: 50 ستاره تلگرام یا معادل 5 دلار ارز دیجیتال\n` +
+              `• هزینه عضویت: ${(starsAmount || 60)} ستاره تلگرام یا معادل ${cryptoPriceUSD || 1} دلار ارز دیجیتال\n` +
               `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
               `🔹 <b>نحوه استخراج فایل پس از دانلود:</b>\n` +
               `• فایل ZIP دانلود شده را با <b>7-Zip</b> یا <b>WinRAR</b> باز کنید.\n` +
