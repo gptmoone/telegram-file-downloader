@@ -371,7 +371,7 @@ async function handleSuccessfulPayment(env, message, TOKEN) {
   const chatId = message.chat.id.toString();
   const payment = message.successful_payment;
   const payload = payment.invoice_payload;
-  const starsAmount = payment.total_amount / 100; // XTR is in cents? Actually Stars are integer, total_amount is in smallest unit (cents for USD, for XTR it's Stars*100? Let's check. Telegram says for XTR, amount is in Stars, no division needed. But safest: stars = payment.total_amount)
+  const starsAmount = payment.total_amount / 60; // XTR is in cents? Actually Stars are integer, total_amount is in smallest unit (cents for USD, for XTR it's Stars*100? Let's check. Telegram says for XTR, amount is in Stars, no division needed. But safest: stars = payment.total_amount)
   // Actually for XTR, total_amount is number of stars (not multiplied by 100). So keep as is.
   const stars = payment.total_amount;
   if (payload && payload.startsWith('stars:')) {
@@ -761,7 +761,7 @@ export default {
               const cryptoInvoice = await createNowPaymentsInvoice(env, chatId, cryptoPriceUSD);
               let keyboardRows = [];
               if (starsInvoice.success) {
-                keyboardRows.push([{ text: "⭐️ خرید با Telegram Stars (130 ستاره)", url: starsInvoice.invoiceLink }]);
+                keyboardRows.push([{ text: "⭐️ خرید با Telegram Stars (60 ستاره)", url: starsInvoice.invoiceLink }]);
               }
               if (cryptoInvoice.success) {
                 keyboardRows.push([{ text: "💰 خرید با ارز دیجیتال (TON)", url: cryptoInvoice.invoiceUrl }]);
