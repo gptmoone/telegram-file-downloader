@@ -1,5 +1,5 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه نهایی با رفع قطعی خطای منوی ادمین
+// ربات دانلودر ملی - نسخه نهایی (رفع کامل مشکلات منو و تخفیف)
 // ============================================================
 
 // ---------- تنظیمات قابل تغییر ----------
@@ -906,18 +906,17 @@ export default {
       try {
         const update = await request.json();
         
-        // اضافه کردن کاربر به دیتابیس
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString());
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString());
 
-        // دستور لغو broadcast
+        // لغو broadcast
         if (update.message?.text === '/cancel_broadcast' && update.message.chat.id.toString() === ADMIN_CHAT_ID) {
           broadcastCancelFlag = true;
           await sendSimple(ADMIN_CHAT_ID, "⛔ درخواست لغو ارسال همگانی ثبت شد.", TOKEN);
           return new Response('OK');
         }
 
-        // PreCheckout و SuccessfulPayment
+        // PreCheckout
         if (update.pre_checkout_query) {
           await handlePreCheckoutQuery(env, update.pre_checkout_query, TOKEN);
           return new Response('OK');
@@ -927,7 +926,7 @@ export default {
           return new Response('OK');
         }
 
-        // ---------- دکمه‌های شیشه‌ای ----------
+        // ---------- دکمه‌ها ----------
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
@@ -993,7 +992,7 @@ export default {
               await sendSimple(chatId, "❌ خطا در ایجاد لینک پرداخت.", TOKEN);
             } else {
               const keyboard = { inline_keyboard: keyboardRows };
-              await sendMessage(chatId, `🎁 تخفیف ویژه! اشتراک Pro فقط با ${discount.starsPrice} ستاره یا ${discount.usdPrice} دلار.\n\nاین پیشنهاد تا ${new Date(discount.expiresAt * 1000).toLocaleString('fa-IR')} معتبر است.`, keyboard, TOKEN);
+              await sendMessage(chatId, `🎁 تخفیف ویژه! عضویت Pro فقط با ${discount.starsPrice} ستاره یا ${discount.usdPrice} دلار.\n\nاین پیشنهاد تا ${new Date(discount.expiresAt * 1000).toLocaleString('fa-IR')} معتبر است.`, keyboard, TOKEN);
             }
             return new Response('OK');
           }
@@ -1009,7 +1008,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---------- عملیات مدیریتی (دکمه‌ای) ----------
+          // ---------- عملیات مدیریتی ----------
           if (data === 'admin_reset_queue' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             adminTempState.delete(chatId);
             const result = await adminResetQueue(env, ADMIN_SECRET, ADMIN_SECRET);
@@ -1030,7 +1029,7 @@ export default {
           }
           if (data === 'admin_reset_quota' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             adminTempState.set(chatId, { step: 'awaiting_quota_userid' });
-            await sendSimple(chatId, "🔹 لطفاً شناسه عددی کاربر (chat id) که می‌خواهید سهمیه‌اش ریست شود را وارد کنید:", TOKEN);
+            await sendSimple(chatId, "🔹 لطفاً شناسه عددی کاربر (chat id) مورد نظر را وارد کنید:", TOKEN);
             return new Response('OK');
           }
           if (data === 'admin_set_channel' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
@@ -1103,7 +1102,12 @@ export default {
               } else {
                 keyboardRows.push([{ text: "🔙 بازگشت", callback_data: "stats" }]);
                 const proKeyboard = { inline_keyboard: keyboardRows };
-                await sendMessage(chatId, `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره (حدود ${(starsAmount * 0.013).toFixed(2)} دلار)${discountText}\n• ارز دیجیتال: ${usdAmount} USD (معادل TON)${discountText}\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`, proKeyboard, TOKEN);
+                let messageText = `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره (حدود ${(starsAmount * 0.013).toFixed(2)} دلار)`;
+                if (discount) {
+                  messageText += `\n🎁 تخفیف ویژه: ${starsAmount} ستاره (به جای ${STARS_AMOUNT}) / ${usdAmount} USD (به جای ${USD_AMOUNT}) تا ${new Date(discount.expiresAt * 1000).toLocaleString('fa-IR')}`;
+                }
+                messageText += `\n• ارز دیجیتال: ${usdAmount} USD (معادل TON)\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`;
+                await sendMessage(chatId, messageText, proKeyboard, TOKEN);
               }
             }
             return new Response('OK');
@@ -1145,7 +1149,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---------- دکمه آمار لحظه‌ای ----------
+          // ---------- دکمه آمار ----------
           if (data === 'stats') {
             try {
               const stats = await dbGetGlobalStats(env);
@@ -1210,7 +1214,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---------- دکمه حذف فایل من ----------
+          // ---------- دکمه حذف فایل ----------
           if (data === 'delete_my_file') {
             try {
               const lastBranch = await dbGetLastBranch(env, chatId);
@@ -1260,11 +1264,11 @@ export default {
           const chatId = update.message.chat.id.toString();
           const text = update.message.text.trim();
 
-          // ========== اولویت 1: وضعیت موقت ادمین (بالاترین اولویت) ==========
-          if (adminTempState.has(chatId) && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
+          // ========== اولویت 1: وضعیت موقت ادمین ==========
+          if (adminTempState.has(chatId) && chatId === ADMIN_CHAT_ID) {
             const state = adminTempState.get(chatId);
 
-            // مرحله تنظیم تخفیف - دریافت مدت به ساعت
+            // مرحله تنظیم تخفیف - مدت
             if (state.step === 'awaiting_discount_duration') {
               const hours = parseInt(text);
               if (isNaN(hours) || hours <= 0) {
@@ -1276,7 +1280,7 @@ export default {
               return new Response('OK');
             }
             
-            // مرحله تنظیم تخفیف - دریافت ستاره تخفیفی
+            // مرحله تنظیم تخفیف - ستاره
             if (state.step === 'awaiting_discount_stars') {
               const starsPrice = parseInt(text);
               if (isNaN(starsPrice) || starsPrice <= 0) {
@@ -1288,7 +1292,7 @@ export default {
               return new Response('OK');
             }
             
-            // مرحله تنظیم تخفیف - دریافت دلار تخفیفی
+            // مرحله تنظیم تخفیف - دلار
             if (state.step === 'awaiting_discount_usd') {
               const usdPrice = parseFloat(text);
               if (isNaN(usdPrice) || usdPrice <= 0) {
@@ -1302,7 +1306,7 @@ export default {
               return new Response('OK');
             }
 
-            // مرحله دریافت پیام همگانی
+            // مرحله پیام همگانی
             if (state.step === 'awaiting_broadcast_message') {
               if (text === '/cancel') {
                 adminTempState.delete(chatId);
@@ -1316,7 +1320,7 @@ export default {
               return new Response('OK');
             }
 
-            // مرحله ارتقا کاربر به Pro
+            // مرحله ارتقا به Pro
             if (state.step === 'awaiting_promote_userid') {
               const targetUserId = text;
               const result = await adminPromoteToPro(env, targetUserId, ADMIN_SECRET, ADMIN_SECRET);
@@ -1326,7 +1330,7 @@ export default {
               return new Response('OK');
             }
 
-            // مرحله ریست سهمیه کاربر
+            // مرحله ریست سهمیه
             if (state.step === 'awaiting_quota_userid') {
               const targetUserId = text;
               const result = await adminResetQuota(env, targetUserId, ADMIN_SECRET, ADMIN_SECRET);
@@ -1336,7 +1340,7 @@ export default {
               return new Response('OK');
             }
 
-            // مرحله افزودن کانال اجباری
+            // مرحله افزودن کانال
             if (state.step === 'awaiting_add_channel') {
               const channel = text;
               const result = await adminAddChannel(env, channel, ADMIN_SECRET, ADMIN_SECRET);
@@ -1346,7 +1350,6 @@ export default {
               return new Response('OK');
             }
 
-            // اگر هیچ مرحله‌ای مطابقت نداشت، پاک کن
             adminTempState.delete(chatId);
           }
 
@@ -1427,7 +1430,7 @@ export default {
             return new Response('OK');
           }
 
-          // ========== اولویت 3: دستور /start (خوش‌آمدگویی کامل) ==========
+          // ========== اولویت 3: /start ==========
           if (text === '/start') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
@@ -1458,7 +1461,7 @@ export default {
             return new Response('OK');
           }
 
-          // ========== اولویت 4: دریافت لینک ==========
+          // ========== اولویت 4: لینک ==========
           if (text.match(/^https?:\/\//)) {
             const requiredChannels = await getRequiredChannels(env);
             if (requiredChannels.length > 0) {
@@ -1481,7 +1484,7 @@ export default {
             return new Response('OK');
           }
 
-          // ========== اولویت 5: دریافت رمز عبور ==========
+          // ========== اولویت 5: رمز عبور ==========
           const userState = await dbGetUserState(env, chatId);
           if (userState && userState.status === 'awaiting_password' && userState.requestData) {
             const password = text;
@@ -1516,7 +1519,9 @@ export default {
     return new Response('Bot is running');
   },
 
-  // ---------- متدهای پردازش تسک ----------
+  // ============================================================
+  // متدهای پردازش تسک
+  // ============================================================
   async runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
     const userId = `${chatId}_${Date.now()}`;
     let retry = 0;
