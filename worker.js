@@ -18,7 +18,7 @@ const ADMIN_KEYBOARD = {
     [{ text: "🔙 بازگشت به منوی اصلی", callback_data: "back_to_main" }]
   ]
 };
-const MAX_CONCURRENT = 4;
+const MAX_CONCURRENT = 6;
 const MAX_RETRIES = 1;
 const RETRY_INTERVAL = 30000;
 const START_WAIT_INTERVAL = 30000;
