@@ -1,116 +1,121 @@
 name: Download and Split
 
 on:
+name: Download and Split for User
+
+on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: 'URL of the file to download'
+        description: 'لینک مستقیم فایل'
         required: true
+        type: string
       zip_password:
-        description: 'Password for the final ZIP'
+        description: 'رمز عبور ZIP'
         required: true
+        type: string
       user_id:
-        description: 'Telegram user ID (chatId_timestamp)'
+        description: 'شناسه کاربر'
         required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  download-and-split:
+  process:
     runs-on: ubuntu-latest
-    timeout-minutes: 300   # 5 ساعت برای فایل‌های خیلی بزرگ
-    
     steps:
-      - name: Checkout repository
+      - name: Notify Worker that job started
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/started" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\"}"
+
+      - name: Optimized Checkout (fast)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Install aria2 for faster multi-connection download
-        run: sudo apt-get update && sudo apt-get install -y aria2
+      - name: Install 7z
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Download file with aria2 (8 connections, retry 5 times)
+      - name: Download file with original name
         run: |
-          aria2c -x 8 -s 8 -k 1M \
-                 --max-tries=5 \
-                 --retry-wait=5 \
-                 --connect-timeout=30 \
-                 --timeout=60 \
-                 --summary-interval=1 \
-                 -o input_file "${{ github.event.inputs.file_url }}"
-        continue-on-error: false
-
-      - name: Check if download succeeded
-        run: |
-          if [ ! -f input_file ]; then
-            echo "Download failed - file not found"
-            exit 1
+          ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
+          if [ -z "$ORIGINAL_NAME" ]; then
+            ORIGINAL_NAME="downloaded_file"
           fi
-          echo "Download completed. File size: $(du -h input_file | cut -f1)"
+          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+          curl -L --fail --retry 3 -o "$ORIGINAL_NAME" "${{ github.event.inputs.file_url }}"
 
-      - name: Split into chunks (max 50MB per chunk)
+      - name: Create archive chunks (95MB each)
         run: |
-          mkdir -p chunks
-          # حجم هر تکه: 50 مگابایت (می‌تونید به 45MB یا 60MB تغییر بدید)
-          split -b 50M -d input_file chunks/archive.7z.
-          # نامگذاری تکه‌ها: archive.7z.00, archive.7z.01, ...
-          cd chunks
-          for f in archive.7z.*; do
-            mv "$f" "$f.7z"
-          done
-          # ترتیب فایل‌ها را حفظ کن
-          ls -la
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" "${{ env.ORIGINAL_NAME }}"
 
-      - name: Create a branch for this user
+      - name: Clean up original file
+        run: rm -f "${{ env.ORIGINAL_NAME }}"
+
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          BRANCH_NAME="${{ github.event.inputs.user_id }}"
-          git checkout -b "$BRANCH_NAME"
-          git add chunks/
-          git commit -m "Upload chunks for user ${{ github.event.inputs.user_id }}"
-          git push origin "$BRANCH_NAME"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Notify Worker that processing has started
+      - name: Get total chunks count
+        id: chunks
         run: |
-          curl -X POST "${{ secrets.WORKER_URL }}/api/started" \
+          CHUNKS=$(ls archive.7z.* 2>/dev/null | wc -l)
+          echo "total_chunks=$CHUNKS" >> $GITHUB_OUTPUT
+
+      - name: Notify Worker about total chunks
+        run: |
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
             -H "Content-Type: application/json" \
-            -d '{"user_id": "${{ github.event.inputs.user_id }}"}' \
-            -f || true
+            -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"total_chunks\":${{ steps.chunks.outputs.total_chunks }}}"
 
-      - name: Notify progress (every 10 chunks) - optional
+      - name: Create user branch
         run: |
-          TOTAL_CHUNKS=$(ls chunks/ | wc -l)
-          echo "total_chunks=$TOTAL_CHUNKS" >> $GITHUB_ENV
-          echo "Total chunks: $TOTAL_CHUNKS"
-          # هر 10 تکه که آپلود شد، update بفرست
-          COUNT=0
-          for chunk in chunks/*; do
-            COUNT=$((COUNT+1))
-            if [ $((COUNT % 10)) -eq 0 ] || [ $COUNT -eq $TOTAL_CHUNKS ]; then
-              curl -X POST "${{ secrets.WORKER_URL }}/api/progress" \
-                -H "Content-Type: application/json" \
-                -d "{\"user_id\": \"${{ github.event.inputs.user_id }}\", \"total_chunks\": $TOTAL_CHUNKS, \"uploaded_chunks\": $COUNT}" \
-                -f || true
-            fi
+          BRANCH_NAME="user_${{ github.event.inputs.user_id }}_$(date +%s)"
+          git checkout --orphan "$BRANCH_NAME"
+          git rm -rf . 2>/dev/null || true
+          echo "# Files for user ${{ github.event.inputs.user_id }}" > README.md
+          chunks=(archive.7z.*)
+          total=${#chunks[@]}
+          batch_size=2
+          start=0
+          uploaded=0
+          while [ $start -lt $total ]; do
+            end=$((start + batch_size - 1))
+            [ $end -ge $total ] && end=$((total - 1))
+            for i in $(seq $start $end); do
+              git add "${chunks[$i]}"
+            done
+            git add README.md
+            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
+            for attempt in {1..5}; do
+              if git push origin "$BRANCH_NAME"; then
+                echo "Push successful for chunks $((start+1))-$((end+1))"
+                uploaded=$((end+1))
+                break
+              else
+                echo "Push failed (attempt $attempt), retrying in 10 seconds..."
+                sleep 10
+              fi
+            done
+            curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/progress" \
+              -H "Content-Type: application/json" \
+              -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\", \"uploaded_chunks\":$uploaded}"
+            start=$((end + 1))
+            sleep 2
           done
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
-      - name: Create final ZIP with password protection
+      - name: Notify Worker that job is done
+        # اصلاح: استفاده از یک خط کامل و فرار صحیح از دابل‌کوت
         run: |
-          sudo apt-get install -y p7zip-full
-          cd chunks
-          # تمام تکه‌ها را به یک فایل 7z تبدیل می‌کنیم (اما خود تکه‌ها هم بصورت جدا آپلود شدند)
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on archive.7z ./*.7z
-          # archive.7z تولید شد (اختیاری)
-          ls -la
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/complete" -H "Content-Type: application/json" -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"branch\":\"${{ env.BRANCH_NAME }}\"}"
 
-      - name: Notify completion
-        run: |
-          curl -X POST "${{ secrets.WORKER_URL }}/api/complete" \
-            -H "Content-Type: application/json" \
-            -d '{"user_id": "${{ github.event.inputs.user_id }}", "branch": "${{ github.event.inputs.user_id }}"}' \
-            -f || true
-
-      - name: Cleanup on failure
+      - name: Notify Worker on failure
         if: failure()
         run: |
-          curl -X POST "${{ secrets.WORKER_URL }}/api/failed" \
-            -H "Content-Type: application/json" \
-            -d '{"user_id": "${{ github.event.inputs.user_id }}"}' \
-            -f || true
+          curl -X POST "https://telegram-file-bot.gptmoone.workers.dev/api/failed" -H "Content-Type: application/json" -d "{\"user_id\":\"${{ github.event.inputs.user_id }}\",\"error\":\"Workflow failed\"}"
