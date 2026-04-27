@@ -1,5 +1,5 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه نهایی با ارسال همگانی بدون فریز
+// ربات دانلودر ملی - نسخه نهایی با پنل مدیریت کامل و ارسال همگانی
 // ============================================================
 
 // ---------- تنظیمات قابل تغییر ----------
@@ -26,7 +26,8 @@ const ADMIN_KEYBOARD = {
     [{ text: "⭐️ تبدیل کاربر به Pro", callback_data: "admin_promote" }, { text: "🔄 ریست سهمیه کاربر", callback_data: "admin_reset_quota" }],
     [{ text: "📢 تنظیم کانال اجباری", callback_data: "admin_set_channel" }, { text: "📋 مشاهده کانال‌ها", callback_data: "admin_show_channels" }],
     [{ text: "📨 ارسال پیام همگانی", callback_data: "admin_broadcast" }, { text: "🎁 تنظیم تخفیف", callback_data: "admin_set_discount" }],
-    [{ text: "❌ لغو تخفیف", callback_data: "admin_clear_discount" }, { text: "🔙 بازگشت به منوی اصلی", callback_data: "back_to_main" }]
+    [{ text: "❌ لغو تخفیف", callback_data: "admin_clear_discount" }, { text: "📊 وضعیت ارسال", callback_data: "admin_broadcast_status" }],
+    [{ text: "🔙 بازگشت به منوی اصلی", callback_data: "back_to_main" }]
   ]
 };
 
@@ -53,7 +54,7 @@ const DAILY_VOLUME_PRO_BYTES = PRO_DAILY_VOLUME_MB * 1024 * 1024;
 const lastCallbackProcessed = new Map();
 let adminTempState = new Map();
 let broadcastCancelFlag = false;
-let broadcastProgress = new Map(); // ذخیره وضعیت پیشرفت ارسال: { total, sent, status, messageId }
+let broadcastProgress = new Map(); // ذخیره وضعیت پیشرفت ارسال: { total, sent, fail, status, messageId, chatId }
 
 // ============================================================
 // توابع کمکی عمومی
@@ -67,11 +68,12 @@ async function sendMessage(chatId, text, keyboard, TOKEN) {
     disable_web_page_preview: true,
     reply_markup: JSON.stringify(keyboard || MAIN_KEYBOARD)
   };
-  return fetch(url, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+  return res;
 }
 
 async function sendSimple(chatId, text, TOKEN) {
@@ -88,11 +90,17 @@ async function editMessage(chatId, messageId, text, keyboard, TOKEN) {
     disable_web_page_preview: true,
     reply_markup: JSON.stringify(keyboard || MAIN_KEYBOARD)
   };
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return res;
+  } catch (err) {
+    console.error('editMessage error:', err);
+    return null;
+  }
 }
 
 async function answerCallback(callbackId, TOKEN) {
@@ -725,7 +733,7 @@ async function adminShowChannels(env, chatId, adminSecret, providedSecret, TOKEN
 }
 
 // ============================================================
-// ارسال پیام همگانی (Broadcast) با قابلیت نمایش پیشرفت
+// ارسال پیام همگانی (Broadcast) با قابلیت مشاهده پیشرفت
 // ============================================================
 async function startBroadcast(env, adminChatId, messageText, TOKEN, statusMessageId = null) {
   const users = await getAllUsers(env);
@@ -740,21 +748,25 @@ async function startBroadcast(env, adminChatId, messageText, TOKEN, statusMessag
   broadcastCancelFlag = false;
   const discount = await getDiscountSettings(env);
   
-  // ذخیره وضعیت برای نمایش
-  broadcastProgress.set(adminChatId, { total, sent: 0, fail: 0, status: 'running' });
-  
   // ارسال پیام اولیه با وضعیت
   let statusMsgId = statusMessageId;
   if (!statusMsgId) {
-    const msg = await sendMessage(adminChatId, `📨 در حال ارسال پیام همگانی...\n\n📊 پیشرفت: 0 از ${total} (0%)\n✅ موفق: 0\n❌ ناموفق: 0\n\n⚠️ برای لغو ارسال، دستور /cancel_broadcast را بفرستید.`, MAIN_KEYBOARD, TOKEN);
-    const data = await msg.json();
-    statusMsgId = data.result?.message_id;
+    const msgRes = await sendMessage(adminChatId, 
+      `📨 در حال ارسال پیام همگانی...\n\n📊 پیشرفت: 0 از ${total} (0%)\n✅ موفق: 0\n❌ ناموفق: 0\n\n⏱️ زمان شروع: ${new Date().toLocaleTimeString('fa-IR')}\n\n⚠️ برای لغو ارسال، دستور /cancel_broadcast را بفرستید.`, 
+      MAIN_KEYBOARD, TOKEN);
+    const msgData = await msgRes.json();
+    statusMsgId = msgData.result?.message_id;
   }
+  
+  // ذخیره وضعیت
+  broadcastProgress.set(adminChatId, { total, sent, fail, status: 'running', messageId: statusMsgId, startTime: Date.now() });
   
   for (let i = 0; i < users.length; i++) {
     if (broadcastCancelFlag) {
-      broadcastProgress.set(adminChatId, { total, sent, fail, status: 'cancelled' });
-      await editMessage(adminChatId, statusMsgId, `⛔ ارسال پیام همگانی لغو شد.\n\n📊 پیشرفت: ${sent} از ${total} (${Math.round(sent/total*100)}%)\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}`, MAIN_KEYBOARD, TOKEN);
+      broadcastProgress.set(adminChatId, { total, sent, fail, status: 'cancelled', messageId: statusMsgId, startTime: Date.now() });
+      await editMessage(adminChatId, statusMsgId, 
+        `⛔ ارسال پیام همگانی لغو شد.\n\n📊 نتیجه:\n👥 کل کاربران: ${total}\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n📈 درصد: ${Math.round(sent/total*100)}%\n\n⏱️ زمان لغو: ${new Date().toLocaleTimeString('fa-IR')}`, 
+        MAIN_KEYBOARD, TOKEN);
       return;
     }
     
@@ -785,16 +797,20 @@ async function startBroadcast(env, adminChatId, messageText, TOKEN, statusMessag
     
     // به‌روزرسانی وضعیت هر 10 پیام
     if ((i + 1) % 10 === 0 || i === users.length - 1) {
-      broadcastProgress.set(adminChatId, { total, sent, fail, status: 'running' });
+      broadcastProgress.set(adminChatId, { total, sent, fail, status: 'running', messageId: statusMsgId, startTime: Date.now() });
       const percent = Math.round(sent / total * 100);
-      await editMessage(adminChatId, statusMsgId, `📨 در حال ارسال پیام همگانی...\n\n📊 پیشرفت: ${sent} از ${total} (${percent}%)\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n\n⚠️ برای لغو ارسال، دستور /cancel_broadcast را بفرستید.`, MAIN_KEYBOARD, TOKEN);
+      await editMessage(adminChatId, statusMsgId, 
+        `📨 در حال ارسال پیام همگانی...\n\n📊 پیشرفت: ${sent} از ${total} (${percent}%)\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n\n⏱️ شروع: ${new Date(broadcastProgress.get(adminChatId).startTime).toLocaleTimeString('fa-IR')}\n🕐 به‌روزرسانی: ${new Date().toLocaleTimeString('fa-IR')}\n\n⚠️ برای لغو: /cancel_broadcast\n📊 برای وضعیت: /broadcast_status`, 
+        MAIN_KEYBOARD, TOKEN);
     }
     
     if (i < users.length - 1) await new Promise(r => setTimeout(r, BROADCAST_DELAY_MS));
   }
   
-  broadcastProgress.set(adminChatId, { total, sent, fail, status: 'completed' });
-  await editMessage(adminChatId, statusMsgId, `✅ ارسال پیام همگانی پایان یافت.\n\n📊 نتیجه نهایی:\n👥 کل کاربران: ${total}\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}`, MAIN_KEYBOARD, TOKEN);
+  broadcastProgress.set(adminChatId, { total, sent, fail, status: 'completed', messageId: statusMsgId, startTime: Date.now() });
+  await editMessage(adminChatId, statusMsgId, 
+    `✅ ارسال پیام همگانی پایان یافت.\n\n📊 نتیجه نهایی:\n👥 کل کاربران: ${total}\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n📈 درصد تکمیل: 100%\n\n⏱️ زمان پایان: ${new Date().toLocaleTimeString('fa-IR')}\n⏱️ مدت زمان: ${Math.round((Date.now() - broadcastProgress.get(adminChatId).startTime) / 1000)} ثانیه`, 
+    MAIN_KEYBOARD, TOKEN);
 }
 
 // ============================================================
@@ -963,10 +979,23 @@ export default {
         if (update.message?.text === '/broadcast_status' && update.message.chat.id.toString() === ADMIN_CHAT_ID) {
           const progress = broadcastProgress.get(ADMIN_CHAT_ID);
           if (!progress) {
-            await sendSimple(ADMIN_CHAT_ID, "ℹ️ هیچ ارسال همگانی فعال یا اخیری وجود ندارد.", TOKEN);
+            await sendSimple(ADMIN_CHAT_ID, "ℹ️ هیچ ارسال همگانی فعال یا اخیری وجود ندارد.\n\nبرای شروع ارسال، از پنل مدیریت گزینه «📨 ارسال پیام همگانی» را انتخاب کنید.", TOKEN);
           } else {
-            const statusText = progress.status === 'running' ? '🔄 در حال ارسال...' : (progress.status === 'cancelled' ? '⛔ لغو شده' : '✅ تکمیل شده');
-            await sendSimple(ADMIN_CHAT_ID, `📊 وضعیت آخرین ارسال همگانی:\n\n📌 وضعیت: ${statusText}\n👥 کل: ${progress.total}\n✅ موفق: ${progress.sent}\n❌ ناموفق: ${progress.fail}\n📈 درصد: ${Math.round(progress.sent/progress.total*100)}%`, TOKEN);
+            let statusText = '';
+            if (progress.status === 'running') statusText = '🔄 در حال ارسال...';
+            else if (progress.status === 'cancelled') statusText = '⛔ لغو شده';
+            else statusText = '✅ تکمیل شده';
+            
+            const elapsed = Math.round((Date.now() - (progress.startTime || Date.now())) / 1000);
+            await sendSimple(ADMIN_CHAT_ID, 
+              `📊 *وضعیت ارسال همگانی*\n\n` +
+              `📌 وضعیت: ${statusText}\n` +
+              `👥 کل کاربران: ${progress.total}\n` +
+              `✅ موفق: ${progress.sent}\n` +
+              `❌ ناموفق: ${progress.fail}\n` +
+              `📈 درصد تکمیل: ${Math.round(progress.sent/progress.total*100)}%\n` +
+              `⏱️ زمان سپری شده: ${Math.floor(elapsed/60)} دقیقه ${elapsed%60} ثانیه\n\n` +
+              `⚠️ برای لغو: /cancel_broadcast`, TOKEN);
           }
           return new Response('OK');
         }
@@ -1062,6 +1091,31 @@ export default {
             await sendMessage(chatId, "🌀 بازگشت به منوی اصلی", welcomeKeyboard, TOKEN);
             return new Response('OK');
           }
+          
+          // دکمه مشاهده وضعیت ارسال همگانی
+          if (data === 'admin_broadcast_status' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
+            const progress = broadcastProgress.get(ADMIN_CHAT_ID);
+            if (!progress) {
+              await sendSimple(ADMIN_CHAT_ID, "ℹ️ هیچ ارسال همگانی فعال یا اخیری وجود ندارد.", TOKEN);
+            } else {
+              let statusText = '';
+              if (progress.status === 'running') statusText = '🔄 در حال ارسال...';
+              else if (progress.status === 'cancelled') statusText = '⛔ لغو شده';
+              else statusText = '✅ تکمیل شده';
+              
+              const elapsed = Math.round((Date.now() - (progress.startTime || Date.now())) / 1000);
+              await sendSimple(ADMIN_CHAT_ID, 
+                `📊 *وضعیت ارسال همگانی*\n\n` +
+                `📌 وضعیت: ${statusText}\n` +
+                `👥 کل کاربران: ${progress.total}\n` +
+                `✅ موفق: ${progress.sent}\n` +
+                `❌ ناموفق: ${progress.fail}\n` +
+                `📈 درصد تکمیل: ${Math.round(progress.sent/progress.total*100)}%\n` +
+                `⏱️ زمان سپری شده: ${Math.floor(elapsed/60)} دقیقه ${elapsed%60} ثانیه\n\n` +
+                `⚠️ برای لغو: /cancel_broadcast`, TOKEN);
+            }
+            return new Response('OK');
+          }
 
           // ---------- عملیات مدیریتی ----------
           if (data === 'admin_reset_queue' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
@@ -1098,7 +1152,7 @@ export default {
           }
           if (data === 'admin_broadcast' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
             adminTempState.set(chatId, { step: 'awaiting_broadcast_message' });
-            await sendSimple(chatId, "📨 لطفاً متن پیام همگانی را ارسال کنید.\n(برای لغو /cancel را بفرستید)\n\n💡 نکته: ارسال پیام در پس‌زمینه انجام می‌شود و ربات فریز نمی‌شود.\n📊 برای مشاهده وضعیت، بعداً دستور /broadcast_status را بفرستید.", TOKEN);
+            await sendSimple(chatId, "📨 لطفاً متن پیام همگانی را ارسال کنید.\n(برای لغو /cancel را بفرستید)\n\n💡 نکته: ارسال پیام در پس‌زمینه انجام می‌شود و ربات فریز نمی‌شود.\n📊 برای مشاهده وضعیت، از دکمه «📊 وضعیت ارسال» استفاده کنید.", TOKEN);
             return new Response('OK');
           }
           if (data === 'admin_set_discount' && ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID) {
@@ -1372,7 +1426,7 @@ export default {
               adminTempState.delete(chatId);
               // شروع ارسال همگانی در پس‌زمینه (بدون await برای عدم فریز)
               startBroadcast(env, chatId, text, TOKEN).catch(e => console.error('Broadcast error:', e));
-              await sendSimple(chatId, "📨 ارسال پیام همگانی در پس‌زمینه آغاز شد.\n\n📊 برای مشاهده وضعیت، دستور /broadcast_status را بفرستید.\n\n⚠️ برای لغو، /cancel_broadcast را بفرستید.", TOKEN);
+              await sendSimple(chatId, "📨 ارسال پیام همگانی در پس‌زمینه آغاز شد.\n\n📊 برای مشاهده وضعیت، از دکمه «📊 وضعیت ارسال» در پنل مدیریت استفاده کنید.\n\n⚠️ برای لغو، /cancel_broadcast را بفرستید.", TOKEN);
               await sendMessage(chatId, "🛠 پنل مدیریت", ADMIN_KEYBOARD, TOKEN);
               return new Response('OK');
             }
