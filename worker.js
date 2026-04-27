@@ -755,13 +755,13 @@ export default {
               const expireDate = new Date(row.expires_at * 1000).toLocaleDateString('fa-IR');
               await sendSimple(chatId, `⭐️ وضعیت اشتراک Pro شما\n✅ فعال\n📅 تاریخ انقضا: ${expireDate}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز می‌ماند\n• اولویت بالاتر در صف\n• حداکثر ۵ فایل در روز`, TOKEN);
             } else {
-              const starsAmount = 50; // 50 ستاره
+              const starsAmount = 130; // 50 ستاره
               const starsInvoice = await createStarsInvoiceLink(env, chatId, starsAmount);
-              const cryptoPriceUSD = parseFloat(env.PRO_PRICE) || 5;
+              const cryptoPriceUSD = parseFloat(env.PRO_PRICE) || 1;
               const cryptoInvoice = await createNowPaymentsInvoice(env, chatId, cryptoPriceUSD);
               let keyboardRows = [];
               if (starsInvoice.success) {
-                keyboardRows.push([{ text: "⭐️ خرید با Telegram Stars (50 ستاره)", url: starsInvoice.invoiceLink }]);
+                keyboardRows.push([{ text: "⭐️ خرید با Telegram Stars (130 ستاره)", url: starsInvoice.invoiceLink }]);
               }
               if (cryptoInvoice.success) {
                 keyboardRows.push([{ text: "💰 خرید با ارز دیجیتال (TON)", url: cryptoInvoice.invoiceUrl }]);
@@ -771,7 +771,7 @@ export default {
               } else {
                 keyboardRows.push([{ text: "🔙 بازگشت", callback_data: "stats" }]);
                 const proKeyboard = { inline_keyboard: keyboardRows };
-                await sendMessage(chatId, `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره (حدود 0.65 دلار)\n• ارز دیجیتال: ${cryptoPriceUSD} USD (معادل TON)\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`, proKeyboard, TOKEN);
+                await sendMessage(chatId, `⭐️ عضویت ویژه (Pro)\n\n💰 هزینه:\n• Telegram Stars: ${starsAmount} ستاره \n• ارز دیجیتال: ${cryptoPriceUSD} USD (معادل TON)\n\nپس از پرداخت، اشتراک شما بلافاصله فعال می‌شود.`, proKeyboard, TOKEN);
               }
             }
             return new Response('OK');
