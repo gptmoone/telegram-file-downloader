@@ -30,8 +30,8 @@ const REPO_SIZE_LIMIT_GB = 80;
 const REPO_SIZE_WARNING_GB = 75;
 const TTL_NORMAL = 3600;
 const TTL_PRO = 86400;
-const DAILY_LIMIT_NORMAL = 1;
-const DAILY_LIMIT_PRO = 5;
+const DAILY_LIMIT_NORMAL = 2;
+const DAILY_LIMIT_PRO = 6;
 
 const lastCallbackProcessed = new Map();
 let adminTempState = new Map();
