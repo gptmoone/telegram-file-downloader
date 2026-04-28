@@ -1,5 +1,5 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه نهایی با ارسال همگانی پیشرفته و دکمه‌های کامل
+// ربات دانلودر ملی - نسخه نهایی با رفع مشکل دکمه عضویت اجباری
 // ============================================================
 
 // ---------- تنظیمات قابل تغییر ----------
@@ -977,17 +977,21 @@ export default {
           lastCallbackProcessed.set(`${chatId}_${data}`, now);
           await answerCallback(callbackId, TOKEN);
 
-          // دکمه "عضو شدم"
+          // دکمه "عضو شدم" (اصلاح شده)
           if (data === 'check_membership') {
             (async () => {
               try {
+                // دریافت لینک معلق
                 const pending = await getPendingLink(env, chatId);
                 if (!pending) {
                   await sendSimple(chatId, "❌ لینک معلقی یافت نشد. لطفاً لینک خود را مجدداً ارسال کنید.", TOKEN);
                   return;
                 }
+                
+                // بررسی مجدد عضویت
                 const requiredChannels = await getRequiredChannels(env);
                 const isMember = await isUserMemberOfChannels(chatId, requiredChannels, TOKEN);
+                
                 if (!isMember) {
                   const channelsList = requiredChannels.map(c => `@${c}`).join(', ');
                   const joinKeyboard = {
@@ -1000,8 +1004,13 @@ export default {
                   await savePendingLink(env, chatId, pending.url, pending.fileSize);
                   return;
                 }
+                
+                // کاربر عضو شده است → ادامه فرآیند
                 await processPendingLink(env, chatId, pending.url, pending.fileSize, TOKEN);
-              } catch (err) { console.error(err); }
+              } catch (err) {
+                console.error("Error in check_membership:", err);
+                await sendSimple(chatId, "❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.", TOKEN);
+              }
             })().catch(e => console.error(e));
             return new Response('OK');
           }
