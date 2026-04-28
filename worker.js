@@ -1,5 +1,5 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه نهایی با رفع مشکل دکمه عضویت اجباری
+// ربات دانلودر ملی - نسخه نهایی کامل (بدون هیچ خلاصه‌سازی)
 // ============================================================
 
 // ---------- تنظیمات قابل تغییر ----------
@@ -694,7 +694,7 @@ async function adminShowChannels(env, chatId, adminSecret, providedSecret, TOKEN
 }
 
 // ============================================================
-// ارسال پیام همگانی (Broadcast) - نسخه اصلاح شده با timeout و پیشرفت
+// ارسال پیام همگانی (Broadcast)
 // ============================================================
 async function startBroadcast(env, adminChatId, messageText, TOKEN, statusMessageId = null) {
   const users = await getAllUsers(env);
@@ -977,21 +977,17 @@ export default {
           lastCallbackProcessed.set(`${chatId}_${data}`, now);
           await answerCallback(callbackId, TOKEN);
 
-          // دکمه "عضو شدم" (اصلاح شده)
+          // دکمه "عضو شدم"
           if (data === 'check_membership') {
             (async () => {
               try {
-                // دریافت لینک معلق
                 const pending = await getPendingLink(env, chatId);
                 if (!pending) {
                   await sendSimple(chatId, "❌ لینک معلقی یافت نشد. لطفاً لینک خود را مجدداً ارسال کنید.", TOKEN);
                   return;
                 }
-                
-                // بررسی مجدد عضویت
                 const requiredChannels = await getRequiredChannels(env);
                 const isMember = await isUserMemberOfChannels(chatId, requiredChannels, TOKEN);
-                
                 if (!isMember) {
                   const channelsList = requiredChannels.map(c => `@${c}`).join(', ');
                   const joinKeyboard = {
@@ -1006,7 +1002,60 @@ export default {
                 }
                 
                 // کاربر عضو شده است → ادامه فرآیند
-                await processPendingLink(env, chatId, pending.url, pending.fileSize, TOKEN);
+                const isPro = await isProUser(env, chatId);
+                const { allowed, remaining, limit } = await canUpload(env, chatId, isPro);
+                if (!allowed) {
+                  await sendSimple(chatId, `❌ شما به حداکثر سهمیه روزانه (${limit} فایل) رسیده‌اید. لطفاً فردا دوباره تلاش کنید یا اشتراک Pro تهیه کنید.`, TOKEN);
+                  return;
+                }
+                const quotaMsg = `📊 سهمیه باقیمانده امروز: ${remaining} از ${limit} فایل`;
+                const lastBranch = await dbGetLastBranch(env, chatId);
+                if (lastBranch) {
+                  try {
+                    await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${lastBranch}`, {
+                      method: 'DELETE',
+                      headers: {
+                        'Authorization': `token ${GITHUB_TOKEN}`,
+                        'Accept': 'application/vnd.github.v3+json',
+                        'User-Agent': 'CloudflareWorkerBot/1.0'
+                      }
+                    });
+                    await dbRemoveActiveBranch(env, lastBranch);
+                  } catch(e) { console.error(e); }
+                }
+                await dbDeleteUserState(env, chatId);
+                await dbRemoveFromQueue(env, chatId);
+                const repoSize = await getRepoSize(env);
+                if (repoSize >= REPO_SIZE_LIMIT_GB) {
+                  await sendSimple(chatId, `❌ حجم مخزن به حد مجاز (${REPO_SIZE_LIMIT_GB} گیگابایت) رسیده. لطفاً چند ساعت بعد تلاش کنید.`, TOKEN);
+                  return;
+                } else if (repoSize >= REPO_SIZE_WARNING_GB) {
+                  await sendSimple(chatId, `⚠️ هشدار: حجم مخزن نزدیک به حد مجاز (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت). پس از دانلود، فایل را حذف کنید.`, TOKEN);
+                }
+                const actualFileSize = pending.fileSize || await getFileSize(pending.url);
+                if (actualFileSize && actualFileSize > 2 * 1024 * 1024 * 1024) {
+                  await sendSimple(chatId, "❌ حجم فایل بیشتر از ۲ گیگابایت است.", TOKEN);
+                  return;
+                }
+                const volumeCheck = await canUploadByVolume(env, chatId, actualFileSize || 0, isPro);
+                if (!volumeCheck.allowed) {
+                  const limitMB = isPro ? DAILY_VOLUME_PRO_BYTES/(1024*1024) : DAILY_VOLUME_NORMAL_BYTES/(1024*1024);
+                  const proKeyboard = {
+                    inline_keyboard: [
+                      [{ text: "⭐️ خرید اشتراک Pro", callback_data: "pro_info" }],
+                      [{ text: "📊 وضعیت من", callback_data: "status" }]
+                    ]
+                  };
+                  await sendMessage(chatId,
+                    `❌ حجم فایل شما (${((actualFileSize || 0)/(1024*1024)).toFixed(1)} مگابایت) با سهمیه باقیمانده امروز شما (${(volumeCheck.remainingBytes/(1024*1024)).toFixed(1)} مگابایت) همخوانی ندارد.\n\n` +
+                    `محدودیت حجم روزانه برای ${isPro ? "کاربران Pro" : "کاربران عادی"} ${limitMB} مگابایت است.\n` +
+                    `برای افزایش سهمیه، اشتراک Pro تهیه کنید.`,
+                    proKeyboard, TOKEN);
+                  return;
+                }
+                await dbSetUserState(env, chatId, 'awaiting_password', { url: pending.url, fileSize: actualFileSize || 0 });
+                const cancelKeyboard = { inline_keyboard: [[{ text: "❌ لغو عملیات", callback_data: "cancel_input" }]] };
+                await sendMessage(chatId, `✅ لینک دریافت شد.\n🔐 رمز عبور ZIP را وارد کنید:\n\n${quotaMsg}`, cancelKeyboard, TOKEN);
               } catch (err) {
                 console.error("Error in check_membership:", err);
                 await sendSimple(chatId, "❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.", TOKEN);
@@ -1380,7 +1429,6 @@ export default {
                 return new Response('OK');
               }
               adminTempState.delete(chatId);
-              // شروع ارسال در پس‌زمینه
               startBroadcast(env, chatId, text, TOKEN).catch(e => console.error('Broadcast error:', e));
               await sendSimple(chatId, "📨 ارسال پیام همگانی در پس‌زمینه آغاز شد.\n\n📊 برای مشاهده وضعیت، از دکمه «📊 وضعیت ارسال» استفاده کنید.\n⚠️ برای لغو: /cancel_broadcast", TOKEN);
               await sendMessage(chatId, "🛠 پنل مدیریت", ADMIN_KEYBOARD, TOKEN);
