@@ -1,5 +1,5 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه نهایی با پنل مدیریت کامل و ارسال همگانی
+// ربات دانلودر ملی - نسخه نهایی با ارسال همگانی پیشرفته
 // ============================================================
 
 // ---------- تنظیمات قابل تغییر ----------
@@ -8,6 +8,7 @@ const USD_AMOUNT = 1;
 const NORMAL_DAILY_VOLUME_MB = 600;
 const PRO_DAILY_VOLUME_MB = 6144;
 const BROADCAST_DELAY_MS = 100;
+const BROADCAST_TIMEOUT_MS = 15000;
 
 // ---------- کیبورد اصلی کاربران ----------
 const MAIN_KEYBOARD = {
@@ -54,7 +55,7 @@ const DAILY_VOLUME_PRO_BYTES = PRO_DAILY_VOLUME_MB * 1024 * 1024;
 const lastCallbackProcessed = new Map();
 let adminTempState = new Map();
 let broadcastCancelFlag = false;
-let broadcastProgress = new Map(); // ذخیره وضعیت پیشرفت ارسال: { total, sent, fail, status, messageId, chatId }
+let broadcastProgress = new Map();
 
 // ============================================================
 // توابع کمکی عمومی
@@ -68,12 +69,21 @@ async function sendMessage(chatId, text, keyboard, TOKEN) {
     disable_web_page_preview: true,
     reply_markup: JSON.stringify(keyboard || MAIN_KEYBOARD)
   };
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  return res;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BROADCAST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return res;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
 }
 
 async function sendSimple(chatId, text, TOKEN) {
@@ -143,17 +153,14 @@ async function ensureGlobalStats(env) {
     await env.DB.prepare('INSERT INTO global_stats (id, total_links, total_volume_gb) VALUES (1, 0, 0)').run();
   }
 }
-
 async function dbGetGlobalStats(env) {
   await ensureGlobalStats(env);
   const row = await env.DB.prepare('SELECT total_links, total_volume_gb FROM global_stats WHERE id = 1').first();
   return { total_links: row?.total_links || 0, total_volume_gb: row?.total_volume_gb || 0 };
 }
-
 async function dbIncrementLinks(env, volumeGB) {
   await env.DB.prepare('UPDATE global_stats SET total_links = total_links + 1, total_volume_gb = total_volume_gb + ? WHERE id = 1').bind(volumeGB).run();
 }
-
 async function dbGetUserState(env, chatId) {
   const row = await env.DB.prepare('SELECT status, request_data, branch_name, started_at, total_chunks, uploaded_chunks FROM user_state WHERE chat_id = ?').bind(chatId).first();
   if (!row) return null;
@@ -166,7 +173,6 @@ async function dbGetUserState(env, chatId) {
     uploadedChunks: row.uploaded_chunks
   };
 }
-
 async function dbSetUserState(env, chatId, status, requestData = null, branchName = null, startedAt = null, totalChunks = null, uploadedChunks = null) {
   const requestDataStr = requestData ? JSON.stringify(requestData) : null;
   await env.DB.prepare(`
@@ -174,11 +180,9 @@ async function dbSetUserState(env, chatId, status, requestData = null, branchNam
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).bind(chatId, status, requestDataStr, branchName, startedAt, totalChunks, uploadedChunks).run();
 }
-
 async function dbDeleteUserState(env, chatId) {
   await env.DB.prepare('DELETE FROM user_state WHERE chat_id = ?').bind(chatId).run();
 }
-
 async function dbGetQueueCount(env, onlyPro = false) {
   let sql = 'SELECT COUNT(*) as count FROM queue';
   if (onlyPro) sql += ' WHERE priority = 1';
@@ -186,7 +190,6 @@ async function dbGetQueueCount(env, onlyPro = false) {
   const row = await env.DB.prepare(sql).first();
   return row?.count || 0;
 }
-
 async function dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro = false) {
   const now = Date.now();
   const priority = isPro ? 1 : 0;
@@ -195,7 +198,6 @@ async function dbAddQueue(env, chatId, fileUrl, password, fileSize, isPro = fals
     VALUES (?, ?, ?, ?, ?, ?)
   `).bind(chatId, fileUrl, password, fileSize, now, priority).run();
 }
-
 async function dbPopQueue(env) {
   let row = await env.DB.prepare('SELECT position, chat_id, file_url, zip_password, file_size FROM queue WHERE priority = 1 ORDER BY position ASC LIMIT 1').first();
   if (!row) {
@@ -210,44 +212,35 @@ async function dbPopQueue(env) {
     fileSize: row.file_size
   };
 }
-
 async function dbRemoveFromQueue(env, chatId) {
   await env.DB.prepare('DELETE FROM queue WHERE chat_id = ?').bind(chatId).run();
 }
-
 async function dbGetActiveCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first();
   return row?.count || 0;
 }
-
 async function dbGetActiveBranchesCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM active_branches').first();
   return row?.count || 0;
 }
-
 async function dbGetUsersCount(env) {
   const row = await env.DB.prepare('SELECT COUNT(*) as count FROM users').first();
   return row?.count || 0;
 }
-
 async function dbAddUser(env, chatId) {
   const now = Date.now();
   await env.DB.prepare('INSERT OR IGNORE INTO users (chat_id, first_seen) VALUES (?, ?)').bind(chatId, now).run();
 }
-
 async function dbAddActiveBranch(env, branchName, chatId, createdAt, expiresAt) {
   await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(branchName, chatId, createdAt, expiresAt).run();
 }
-
 async function dbRemoveActiveBranch(env, branchName) {
   await env.DB.prepare('DELETE FROM active_branches WHERE branch_name = ?').bind(branchName).run();
 }
-
 async function dbGetLastBranch(env, chatId) {
   const row = await env.DB.prepare('SELECT branch_name FROM active_branches WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1').bind(chatId).first();
   return row?.branch_name || null;
 }
-
 async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
   const now = Date.now();
   try {
@@ -258,7 +251,6 @@ async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
     throw err;
   }
 }
-
 async function getAllUsers(env) {
   const rows = await env.DB.prepare('SELECT chat_id FROM users').all();
   return rows.results.map(r => r.chat_id);
@@ -278,7 +270,6 @@ async function getDailyLimit(env, chatId) {
   const dailyVolumeBytes = typeof row.daily_volume_bytes === 'number' ? row.daily_volume_bytes : 0;
   return { fileCount, resetDate: row.reset_date, dailyVolumeBytes };
 }
-
 async function incrementDailyLimit(env, chatId, addedVolumeBytes) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
   await env.DB.prepare(`
@@ -291,7 +282,6 @@ async function incrementDailyLimit(env, chatId, addedVolumeBytes) {
     WHERE daily_limits.reset_date >= ?
   `).bind(chatId, todayStart, addedVolumeBytes, todayStart).run();
 }
-
 async function canUploadByVolume(env, chatId, fileSizeBytes, isPro) {
   const { dailyVolumeBytes } = await getDailyLimit(env, chatId);
   const limitBytes = isPro ? DAILY_VOLUME_PRO_BYTES : DAILY_VOLUME_NORMAL_BYTES;
@@ -300,19 +290,16 @@ async function canUploadByVolume(env, chatId, fileSizeBytes, isPro) {
   const remainingBytes = Math.max(0, limitBytes - dailyVolumeBytes);
   return { allowed, remainingBytes, newTotal, limitBytes };
 }
-
 async function canUpload(env, chatId, isPro) {
   const { fileCount } = await getDailyLimit(env, chatId);
   const limit = isPro ? DAILY_LIMIT_PRO : DAILY_LIMIT_NORMAL;
   const remaining = Math.max(0, limit - fileCount);
   return { allowed: remaining > 0, current: fileCount, limit, remaining };
 }
-
 async function resetUserQuota(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
   await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date, daily_volume_bytes) VALUES (?, 0, ?, 0)').bind(chatId, todayStart).run();
 }
-
 async function getRemainingQuotaText(env, chatId, isPro) {
   const { remaining, limit } = await canUpload(env, chatId, isPro);
   const { remainingBytes } = await canUploadByVolume(env, chatId, 0, isPro);
@@ -333,11 +320,9 @@ async function getRequiredChannels(env) {
     return [];
   }
 }
-
 async function setRequiredChannels(env, channelsArray) {
   await env.DB.prepare('INSERT OR REPLACE INTO required_channels (id, channels) VALUES (1, ?)').bind(JSON.stringify(channelsArray)).run();
 }
-
 async function isUserMemberOfChannels(chatId, channels, TOKEN) {
   if (!channels || channels.length === 0) return true;
   for (const channelUsername of channels) {
@@ -354,12 +339,10 @@ async function isUserMemberOfChannels(chatId, channels, TOKEN) {
   }
   return true;
 }
-
 async function savePendingLink(env, chatId, fileUrl, fileSize) {
   const now = Date.now();
   await env.DB.prepare('INSERT OR REPLACE INTO pending_links (chat_id, file_url, file_size, timestamp) VALUES (?, ?, ?, ?)').bind(chatId, fileUrl, fileSize, now).run();
 }
-
 async function getPendingLink(env, chatId) {
   const row = await env.DB.prepare('SELECT file_url, file_size FROM pending_links WHERE chat_id = ?').bind(chatId).first();
   if (!row) return null;
@@ -380,7 +363,6 @@ async function incrementUserStats(env, chatId, fileSizeBytes) {
       total_volume_gb = total_volume_gb + excluded.total_volume_gb
   `).bind(chatId, volumeGB).run();
 }
-
 async function getUserStats(env, chatId) {
   const row = await env.DB.prepare('SELECT total_files, total_volume_gb FROM user_stats WHERE chat_id = ?').bind(chatId).first();
   if (!row) return { total_files: 0, total_volume_gb: 0 };
@@ -395,7 +377,6 @@ async function isProUser(env, chatId) {
   const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
   return !!row;
 }
-
 async function activateProSubscription(env, chatId, paymentId, amountDesc) {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + (30 * 24 * 60 * 60);
@@ -403,13 +384,11 @@ async function activateProSubscription(env, chatId, paymentId, amountDesc) {
     INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at)
     VALUES (?, ?, ?, ?)
   `).bind(chatId, expiresAt, paymentId, now).run();
-  await sendSimple(chatId, 
-    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountDesc}\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n• حداکثر ${DAILY_LIMIT_PRO} فایل و ${DAILY_VOLUME_PRO_BYTES/(1024*1024)} مگابایت در روز\n\nاز اعتماد شما سپاسگزاریم! 🚀`, 
+  await sendSimple(chatId,
+    `✅ عضویت **Pro** شما با موفقیت فعال شد!\n\n💎 مبلغ پرداختی: ${amountDesc}\n📅 تاریخ انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• فایل‌های شما تا ۱ روز روی سرور می‌ماند\n• اولویت بالاتر در صف پردازش\n• حداکثر ${DAILY_LIMIT_PRO} فایل و ${DAILY_VOLUME_PRO_BYTES/(1024*1024)} مگابایت در روز\n\nاز اعتماد شما سپاسگزاریم! 🚀`,
     env.TELEGRAM_TOKEN
   );
 }
-
-// --- توابع تخفیف (هر دو روش) ---
 async function getDiscountSettings(env) {
   const row = await env.DB.prepare('SELECT active, stars_price, usd_price, expires_at FROM discount_settings WHERE id = 1').first();
   if (!row || row.active !== 1) return null;
@@ -420,7 +399,6 @@ async function getDiscountSettings(env) {
   }
   return { starsPrice: row.stars_price, usdPrice: row.usd_price, expiresAt: row.expires_at };
 }
-
 async function setDiscount(env, starsPrice, usdPrice, durationHours) {
   const expiresAt = Math.floor(Date.now() / 1000) + (durationHours * 3600);
   await env.DB.prepare(`
@@ -428,12 +406,9 @@ async function setDiscount(env, starsPrice, usdPrice, durationHours) {
     VALUES (1, 1, ?, ?, ?)
   `).bind(starsPrice, usdPrice, expiresAt).run();
 }
-
 async function clearDiscount(env) {
   await env.DB.prepare('UPDATE discount_settings SET active = 0 WHERE id = 1').run();
 }
-
-// --- NowPayments (ارز دیجیتال) ---
 async function createNowPaymentsInvoice(env, chatId, amountUSD) {
   const orderId = `pro_${chatId}_${Date.now()}`;
   const webhookUrl = `https://telegram-file-bot.gptmoone.workers.dev/api/nowpayments-webhook`;
@@ -461,8 +436,6 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD) {
   }
   return { success: false, error: data };
 }
-
-// --- Telegram Stars ---
 async function createStarsInvoiceLink(env, chatId, starsAmount) {
   const TOKEN = env.TELEGRAM_TOKEN;
   const payload = `stars:${chatId}:${Date.now()}`;
@@ -492,7 +465,6 @@ async function createStarsInvoiceLink(env, chatId, starsAmount) {
     return { success: false, error: err.message };
   }
 }
-
 async function handlePreCheckoutQuery(env, preCheckoutQuery, TOKEN) {
   const answerUrl = `https://api.telegram.org/bot${TOKEN}/answerPreCheckoutQuery`;
   try {
@@ -507,7 +479,6 @@ async function handlePreCheckoutQuery(env, preCheckoutQuery, TOKEN) {
     return false;
   }
 }
-
 async function handleSuccessfulPayment(env, message, TOKEN) {
   const chatId = message.chat.id.toString();
   const payment = message.successful_payment;
@@ -556,7 +527,6 @@ async function cleanupExpiredBranches(env) {
   }
   return { deleted };
 }
-
 async function handleCleanupBranches(request, env) {
   try {
     const { secret } = await request.json();
@@ -617,7 +587,6 @@ async function getBranchTotalSize(env, branchName) {
   }
   return totalSize;
 }
-
 async function getFileSize(url) {
   try {
     const head = await fetch(url, { method: 'HEAD' });
@@ -627,7 +596,6 @@ async function getFileSize(url) {
     return null;
   }
 }
-
 async function deleteBranchFromGitHub(env, branchName) {
   const GITHUB_TOKEN = env.GH_TOKEN;
   const GITHUB_OWNER = 'gptmoone';
@@ -663,7 +631,6 @@ async function adminPromoteToPro(env, targetUserId, adminSecret, providedSecret)
   `).bind(targetUserId, expiresAt, `admin_${Date.now()}`, now).run();
   return `✅ کاربر ${targetUserId} با موفقیت به عضویت Pro درآمد. اشتراک تا ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')} معتبر است.`;
 }
-
 async function adminResetQuota(env, targetUserId, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const userExists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetUserId).first();
@@ -671,13 +638,11 @@ async function adminResetQuota(env, targetUserId, adminSecret, providedSecret) {
   await resetUserQuota(env, targetUserId);
   return `✅ سهمیه روزانه کاربر ${targetUserId} با موفقیت بازنشانی شد.`;
 }
-
 async function adminResetQueue(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   await env.DB.prepare('DELETE FROM queue').run();
   return "✅ صف با موفقیت خالی شد (پردازش‌های جاری دست نخورده).";
 }
-
 async function adminFixActive(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   const processingCount = (await env.DB.prepare('SELECT COUNT(*) as count FROM user_state WHERE status = ?').bind('processing').first())?.count || 0;
@@ -685,7 +650,6 @@ async function adminFixActive(env, adminSecret, providedSecret) {
   await finishTask(env);
   return `✅ ${processingCount} رکورد پردازش گیر کرده لغو شد. صف در حال پردازش است.`;
 }
-
 async function adminAddChannel(env, channelUsername, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   let channels = await getRequiredChannels(env);
@@ -696,7 +660,6 @@ async function adminAddChannel(env, channelUsername, adminSecret, providedSecret
   await setRequiredChannels(env, channels);
   return `✅ کانال @${clean} با موفقیت به لیست عضویت اجباری اضافه شد.`;
 }
-
 async function adminRemoveChannel(env, channelUsername, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   let channels = await getRequiredChannels(env);
@@ -706,13 +669,11 @@ async function adminRemoveChannel(env, channelUsername, adminSecret, providedSec
   await setRequiredChannels(env, channels);
   return `✅ کانال @${clean} از لیست عضویت اجباری حذف شد.`;
 }
-
 async function adminRemoveAllChannels(env, adminSecret, providedSecret) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   await setRequiredChannels(env, []);
   return "✅ تمام کانال‌های اجباری با موفقیت حذف شدند.";
 }
-
 async function adminShowChannels(env, chatId, adminSecret, providedSecret, TOKEN) {
   if (providedSecret !== adminSecret) return "❌ دسترسی غیرمجاز.";
   let channels = await getRequiredChannels(env);
@@ -733,39 +694,37 @@ async function adminShowChannels(env, chatId, adminSecret, providedSecret, TOKEN
 }
 
 // ============================================================
-// ارسال پیام همگانی (Broadcast) با قابلیت مشاهده پیشرفت
+// ارسال پیام همگانی (Broadcast) - نسخه اصلاح شده با timeout
 // ============================================================
 async function startBroadcast(env, adminChatId, messageText, TOKEN, statusMessageId = null) {
   const users = await getAllUsers(env);
-  if (!users.length) {
+  const total = users.length;
+  if (!total) {
     await sendSimple(adminChatId, "❌ هیچ کاربری در دیتابیس یافت نشد.", TOKEN);
     return;
   }
-  
-  const total = users.length;
+
   let sent = 0;
   let fail = 0;
   broadcastCancelFlag = false;
   const discount = await getDiscountSettings(env);
   
-  // ارسال پیام اولیه با وضعیت
   let statusMsgId = statusMessageId;
   if (!statusMsgId) {
-    const msgRes = await sendMessage(adminChatId, 
-      `📨 در حال ارسال پیام همگانی...\n\n📊 پیشرفت: 0 از ${total} (0%)\n✅ موفق: 0\n❌ ناموفق: 0\n\n⏱️ زمان شروع: ${new Date().toLocaleTimeString('fa-IR')}\n\n⚠️ برای لغو ارسال، دستور /cancel_broadcast را بفرستید.`, 
+    const msgRes = await sendMessage(adminChatId,
+      `📨 در حال ارسال پیام همگانی به ${total} کاربر...\n\n📊 پیشرفت: 0 از ${total} (0%)\n✅ موفق: 0\n❌ ناموفق: 0\n\n⏱️ شروع: ${new Date().toLocaleTimeString('fa-IR')}\n\n⚠️ برای لغو: /cancel_broadcast`,
       MAIN_KEYBOARD, TOKEN);
     const msgData = await msgRes.json();
     statusMsgId = msgData.result?.message_id;
   }
   
-  // ذخیره وضعیت
   broadcastProgress.set(adminChatId, { total, sent, fail, status: 'running', messageId: statusMsgId, startTime: Date.now() });
   
-  for (let i = 0; i < users.length; i++) {
+  for (let i = 0; i < total; i++) {
     if (broadcastCancelFlag) {
       broadcastProgress.set(adminChatId, { total, sent, fail, status: 'cancelled', messageId: statusMsgId, startTime: Date.now() });
-      await editMessage(adminChatId, statusMsgId, 
-        `⛔ ارسال پیام همگانی لغو شد.\n\n📊 نتیجه:\n👥 کل کاربران: ${total}\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n📈 درصد: ${Math.round(sent/total*100)}%\n\n⏱️ زمان لغو: ${new Date().toLocaleTimeString('fa-IR')}`, 
+      await editMessage(adminChatId, statusMsgId,
+        `⛔ ارسال همگانی لغو شد.\n📊 نتیجه: ${sent} موفق، ${fail} ناموفق از ${total} کاربر.\n⏱️ زمان لغو: ${new Date().toLocaleTimeString('fa-IR')}`,
         MAIN_KEYBOARD, TOKEN);
       return;
     }
@@ -776,40 +735,44 @@ async function startBroadcast(env, adminChatId, messageText, TOKEN, statusMessag
       if (discount) {
         keyboard = {
           inline_keyboard: [
-            [{ text: `🎁 خرید Pro با تخفیف (${discount.starsPrice} ستاره / ${discount.usdPrice} USD)`, callback_data: "discount_pro" }],
+            [{ text: `🎁 خرید Pro با تخفیف (${discount.starsPrice}⭐ / ${discount.usdPrice}$)`, callback_data: "discount_pro" }],
             ...MAIN_KEYBOARD.inline_keyboard
           ]
         };
       } else {
         keyboard = {
           inline_keyboard: [
-            [{ text: `⭐️ خرید Pro (${STARS_AMOUNT} ستاره / ${USD_AMOUNT} USD)`, callback_data: "pro_info" }],
+            [{ text: `⭐️ خرید Pro (${STARS_AMOUNT}⭐ / ${USD_AMOUNT}$)`, callback_data: "pro_info" }],
             ...MAIN_KEYBOARD.inline_keyboard
           ]
         };
       }
-      await sendMessage(chatId, messageText, keyboard, TOKEN);
+      await Promise.race([
+        sendMessage(chatId, messageText, keyboard, TOKEN),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), BROADCAST_TIMEOUT_MS))
+      ]);
       sent++;
     } catch (err) {
       fail++;
-      console.error(`Broadcast failed for ${chatId}:`, err);
+      console.error(`Broadcast error for ${chatId}:`, err.message);
     }
     
-    // به‌روزرسانی وضعیت هر 10 پیام
-    if ((i + 1) % 10 === 0 || i === users.length - 1) {
-      broadcastProgress.set(adminChatId, { total, sent, fail, status: 'running', messageId: statusMsgId, startTime: Date.now() });
+    if ((i + 1) % 20 === 0 || i === total - 1) {
+      broadcastProgress.set(adminChatId, { total, sent, fail, status: 'running', messageId: statusMsgId, startTime: broadcastProgress.get(adminChatId).startTime });
       const percent = Math.round(sent / total * 100);
-      await editMessage(adminChatId, statusMsgId, 
-        `📨 در حال ارسال پیام همگانی...\n\n📊 پیشرفت: ${sent} از ${total} (${percent}%)\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n\n⏱️ شروع: ${new Date(broadcastProgress.get(adminChatId).startTime).toLocaleTimeString('fa-IR')}\n🕐 به‌روزرسانی: ${new Date().toLocaleTimeString('fa-IR')}\n\n⚠️ برای لغو: /cancel_broadcast\n📊 برای وضعیت: /broadcast_status`, 
+      const elapsedSec = Math.round((Date.now() - broadcastProgress.get(adminChatId).startTime) / 1000);
+      await editMessage(adminChatId, statusMsgId,
+        `📨 ارسال پیام همگانی...\n\n📊 پیشرفت: ${sent} از ${total} (${percent}%)\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n⏱️ زمان سپری شده: ${Math.floor(elapsedSec/60)} دقیقه ${elapsedSec%60} ثانیه\n🕐 آخرین به‌روزرسانی: ${new Date().toLocaleTimeString('fa-IR')}\n\n⚠️ لغو: /cancel_broadcast`,
         MAIN_KEYBOARD, TOKEN);
     }
     
-    if (i < users.length - 1) await new Promise(r => setTimeout(r, BROADCAST_DELAY_MS));
+    if (i < total - 1) await new Promise(r => setTimeout(r, BROADCAST_DELAY_MS));
   }
   
   broadcastProgress.set(adminChatId, { total, sent, fail, status: 'completed', messageId: statusMsgId, startTime: Date.now() });
-  await editMessage(adminChatId, statusMsgId, 
-    `✅ ارسال پیام همگانی پایان یافت.\n\n📊 نتیجه نهایی:\n👥 کل کاربران: ${total}\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n📈 درصد تکمیل: 100%\n\n⏱️ زمان پایان: ${new Date().toLocaleTimeString('fa-IR')}\n⏱️ مدت زمان: ${Math.round((Date.now() - broadcastProgress.get(adminChatId).startTime) / 1000)} ثانیه`, 
+  const elapsedSec = Math.round((Date.now() - broadcastProgress.get(adminChatId).startTime) / 1000);
+  await editMessage(adminChatId, statusMsgId,
+    `✅ ارسال پیام همگانی پایان یافت.\n\n📊 نتیجه نهایی:\n👥 کل: ${total}\n✅ موفق: ${sent}\n❌ ناموفق: ${fail}\n📈 درصد تکمیل: 100%\n⏱️ زمان کل: ${Math.floor(elapsedSec/60)} دقیقه ${elapsedSec%60} ثانیه\n🕐 پایان: ${new Date().toLocaleTimeString('fa-IR')}`,
     MAIN_KEYBOARD, TOKEN);
 }
 
@@ -979,23 +942,15 @@ export default {
         if (update.message?.text === '/broadcast_status' && update.message.chat.id.toString() === ADMIN_CHAT_ID) {
           const progress = broadcastProgress.get(ADMIN_CHAT_ID);
           if (!progress) {
-            await sendSimple(ADMIN_CHAT_ID, "ℹ️ هیچ ارسال همگانی فعال یا اخیری وجود ندارد.\n\nبرای شروع ارسال، از پنل مدیریت گزینه «📨 ارسال پیام همگانی» را انتخاب کنید.", TOKEN);
+            await sendSimple(ADMIN_CHAT_ID, "ℹ️ هیچ ارسال همگانی فعال یا اخیری وجود ندارد.", TOKEN);
           } else {
             let statusText = '';
             if (progress.status === 'running') statusText = '🔄 در حال ارسال...';
             else if (progress.status === 'cancelled') statusText = '⛔ لغو شده';
             else statusText = '✅ تکمیل شده';
-            
-            const elapsed = Math.round((Date.now() - (progress.startTime || Date.now())) / 1000);
+            const elapsedSec = Math.round((Date.now() - (progress.startTime || Date.now())) / 1000);
             await sendSimple(ADMIN_CHAT_ID, 
-              `📊 *وضعیت ارسال همگانی*\n\n` +
-              `📌 وضعیت: ${statusText}\n` +
-              `👥 کل کاربران: ${progress.total}\n` +
-              `✅ موفق: ${progress.sent}\n` +
-              `❌ ناموفق: ${progress.fail}\n` +
-              `📈 درصد تکمیل: ${Math.round(progress.sent/progress.total*100)}%\n` +
-              `⏱️ زمان سپری شده: ${Math.floor(elapsed/60)} دقیقه ${elapsed%60} ثانیه\n\n` +
-              `⚠️ برای لغو: /cancel_broadcast`, TOKEN);
+              `📊 *وضعیت ارسال همگانی*\n\n📌 وضعیت: ${statusText}\n👥 کل کاربران: ${progress.total}\n✅ موفق: ${progress.sent}\n❌ ناموفق: ${progress.fail}\n📈 درصد: ${Math.round(progress.sent/progress.total*100)}%\n⏱️ زمان سپری شده: ${Math.floor(elapsedSec/60)} دقیقه ${elapsedSec%60} ثانیه`, TOKEN);
           }
           return new Response('OK');
         }
@@ -1010,7 +965,7 @@ export default {
           return new Response('OK');
         }
 
-        // ---------- دکمه‌ها ----------
+        // ---------- دکمه‌های شیشه‌ای ----------
         if (update.callback_query) {
           const cb = update.callback_query;
           const chatId = cb.message.chat.id.toString();
@@ -1102,17 +1057,9 @@ export default {
               if (progress.status === 'running') statusText = '🔄 در حال ارسال...';
               else if (progress.status === 'cancelled') statusText = '⛔ لغو شده';
               else statusText = '✅ تکمیل شده';
-              
-              const elapsed = Math.round((Date.now() - (progress.startTime || Date.now())) / 1000);
+              const elapsedSec = Math.round((Date.now() - (progress.startTime || Date.now())) / 1000);
               await sendSimple(ADMIN_CHAT_ID, 
-                `📊 *وضعیت ارسال همگانی*\n\n` +
-                `📌 وضعیت: ${statusText}\n` +
-                `👥 کل کاربران: ${progress.total}\n` +
-                `✅ موفق: ${progress.sent}\n` +
-                `❌ ناموفق: ${progress.fail}\n` +
-                `📈 درصد تکمیل: ${Math.round(progress.sent/progress.total*100)}%\n` +
-                `⏱️ زمان سپری شده: ${Math.floor(elapsed/60)} دقیقه ${elapsed%60} ثانیه\n\n` +
-                `⚠️ برای لغو: /cancel_broadcast`, TOKEN);
+                `📊 *وضعیت ارسال همگانی*\n\n📌 وضعیت: ${statusText}\n👥 کل: ${progress.total}\n✅ موفق: ${progress.sent}\n❌ ناموفق: ${progress.fail}\n📈 درصد: ${Math.round(progress.sent/progress.total*100)}%\n⏱️ زمان: ${Math.floor(elapsedSec/60)} دقیقه ${elapsedSec%60} ثانیه`, TOKEN);
             }
             return new Response('OK');
           }
@@ -1424,9 +1371,9 @@ export default {
                 return new Response('OK');
               }
               adminTempState.delete(chatId);
-              // شروع ارسال همگانی در پس‌زمینه (بدون await برای عدم فریز)
+              // شروع ارسال در پس‌زمینه
               startBroadcast(env, chatId, text, TOKEN).catch(e => console.error('Broadcast error:', e));
-              await sendSimple(chatId, "📨 ارسال پیام همگانی در پس‌زمینه آغاز شد.\n\n📊 برای مشاهده وضعیت، از دکمه «📊 وضعیت ارسال» در پنل مدیریت استفاده کنید.\n\n⚠️ برای لغو، /cancel_broadcast را بفرستید.", TOKEN);
+              await sendSimple(chatId, "📨 ارسال پیام همگانی در پس‌زمینه آغاز شد.\n\n📊 برای مشاهده وضعیت، از دکمه «📊 وضعیت ارسال» استفاده کنید.\n⚠️ برای لغو: /cancel_broadcast", TOKEN);
               await sendMessage(chatId, "🛠 پنل مدیریت", ADMIN_KEYBOARD, TOKEN);
               return new Response('OK');
             }
