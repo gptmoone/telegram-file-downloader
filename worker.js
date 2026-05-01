@@ -5,7 +5,6 @@
 // ---- قیمت‌های پیش‌فرض (قابل تنظیم از پنل مدیریت) ----
 const STARS_AMOUNT = 60;
 const USD_AMOUNT = 1;
-const IRR_AMOUNT = 500000; // اضافه شدن قیمت پیش‌فرض ریالی (تومان/ریال بسته به دلخواه، در اینجا 500000 در نظر گرفته شده)
 const NORMAL_DAILY_VOLUME_MB = 600;
 const PRO_DAILY_VOLUME_MB = 6144;
 const BROADCAST_DELAY_MS = 150;
@@ -32,7 +31,6 @@ const GITHUB_REPO = 'telegram-file-downloader';
 const lastCallbackProcessed = new Map();
 // ---- آی‌دی ربات اصلی (واترمارک) ----
 const BOT_SIGNATURE = '\n\n🤖 <a href="https://t.me/filesmanagement_bot">@filesmanagement_bot</a>';
-
 
 // ============================================================
 // ساخت دکمه‌های رنگی بر اساس مستندات Bot API 9.6 (سال 2026)
@@ -77,7 +75,6 @@ function buildAdminKeyboard() {
       [colorBtn("📨 پیام همگانی", "admin_broadcast", "primary"), colorBtn("📩 ارسال مستقیم پیام", "admin_direct_message", "primary")],
       [colorBtn("🎁 مدیریت تخفیف‌ها", "admin_discount_menu", "green"), colorBtn("📊 وضعیت ارسال", "admin_broadcast_status", "blue")],
       [colorBtn("🚀 شروع صف", "admin_start_queue", "success"), colorBtn("💰 تنظیم قیمت‌ها", "admin_set_prices", "blue")],
-      [colorBtn("💳 تنظیمات درگاه ریالی", "admin_tetra_settings", "success")], // اضافه شدن دکمه مدیریت درگاه ریالی
       [colorBtn("📦 تنظیم محدودیت‌ها", "admin_set_limits", "blue"), colorBtn("👑 مدیریت پلن‌های Pro", "admin_plans_menu", "primary")],
       [colorBtn("👥 اعضای Pro", "admin_pro_members_page:1", "blue"), colorBtn("🔔 تخفیف تمدید", "admin_renewal_discount", "blue")],
       [colorBtn("🎟 مدیریت کدهای تخفیف", "admin_coupon_menu", "green"), colorBtn("🔗 تنظیمات رفرال", "admin_referral_settings", "blue")],
@@ -316,14 +313,6 @@ async function setBotSetting(env, key, value) {
   } catch (e) { console.error('setBotSetting error:', e); }
 }
 
-// تابع چک کردن وضعیت فعال بودن درگاه ریالی تترا
-async function getTetraEnabled(env) {
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'tetra_enabled'").first();
-    return row ? row.setting_value === '1' : false;
-  } catch { return false; }
-}
-
 async function getDirectUploadEnabled(env) {
   try {
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'direct_upload_enabled'").first();
@@ -350,14 +339,6 @@ async function getEffectiveUsdPrice(env) {
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'usd_price'").first();
     return row ? parseFloat(row.setting_value) : USD_AMOUNT;
   } catch { return USD_AMOUNT; }
-}
-
-// تابع دریافت قیمت موثر ریالی پایه‌
-async function getEffectiveIrrPrice(env) {
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'irr_price'").first();
-    return row ? parseInt(row.setting_value) : IRR_AMOUNT;
-  } catch { return IRR_AMOUNT; }
 }
 
 async function getMaintenanceMode(env) {
@@ -430,8 +411,6 @@ async function getRenewalNotifyHours(env) {
     return row ? parseInt(row.setting_value) : 48;
   } catch { return 48; }
 }
-
-
 
 // ============================================================
 // توابع رفرال - با پشتیبانی تولید کد تخفیف
@@ -918,19 +897,18 @@ async function handleOversizedAfterProActivation(env, chatId, TOKEN) {
 
 async function getDiscountSettings(env) {
   try {
-    // شامل فیلد irr_price برای پشتیبانی از درگاه ریالی تترا
-    const row = await env.DB.prepare('SELECT active, stars_price, usd_price, irr_price, expires_at FROM discount_settings WHERE id = 1').first();
+    const row = await env.DB.prepare('SELECT active, stars_price, usd_price, expires_at FROM discount_settings WHERE id = 1').first();
     if (!row || row.active !== 1) return null;
     if (row.expires_at && row.expires_at < Math.floor(Date.now() / 1000)) { 
         await env.DB.prepare('UPDATE discount_settings SET active = 0 WHERE id = 1').run();
         return null; 
     }
-    return { starsPrice: row.stars_price, usdPrice: row.usd_price, irrPrice: row.irr_price, expiresAt: row.expires_at };
+    return { starsPrice: row.stars_price, usdPrice: row.usd_price, expiresAt: row.expires_at };
   } catch { return null; }
 }
 
-async function setDiscount(env, starsPrice, usdPrice, irrPrice, durationHours) {
-  await env.DB.prepare('INSERT OR REPLACE INTO discount_settings (id, active, stars_price, usd_price, irr_price, expires_at) VALUES (1, 1, ?, ?, ?, ?)').bind(starsPrice, usdPrice, irrPrice, Math.floor(Date.now() / 1000) + durationHours * 3600).run();
+async function setDiscount(env, starsPrice, usdPrice, durationHours) {
+  await env.DB.prepare('INSERT OR REPLACE INTO discount_settings (id, active, stars_price, usd_price, expires_at) VALUES (1, 1, ?, ?, ?)').bind(starsPrice, usdPrice, Math.floor(Date.now() / 1000) + durationHours * 3600).run();
 }
 
 async function clearDiscount(env) {
@@ -941,53 +919,6 @@ async function clearDiscount(env) {
 // توابع پرداخت
 // ============================================================
 
-// گرفتن ApiKey تترا از دیتابیس
-async function getTetraApiKey(env) {
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'tetra_api_key'").first();
-    return row ? row.setting_value : '';
-  } catch { return ''; }
-}
-
-// ایجاد لینک پرداخت تترا 98
-async function createTetraInvoiceLink(env, chatId, amountIRR, planId, isRenewal = false) {
-  try {
-    const apiKey = await getTetraApiKey(env);
-    if (!apiKey) return { success: false };
-    
-    const prefix = isRenewal ? 'renewal' : 'pro';
-    const hashId = planId ? `${prefix}_${chatId}_${planId}_${Date.now()}` : `${prefix}_${chatId}_${Date.now()}`;
-    // باید آدرس ورکر خودتان را در متغیر محیطی تنظیم کنید (مثلا: telegram-file-bot.gptmoone.workers.dev)
-    const workerHost = env.WORKER_HOST || 'YOUR_WORKER_HOST.workers.dev'; 
-    const callbackUrl = `https://${workerHost}/api/tetra-verify?hash_id=${hashId}&chat_id=${chatId}&plan_id=${planId || ''}`;
-    
-    const payload = {
-      ApiKey: apiKey,
-      Hash_id: hashId,
-      Amount: amountIRR.toString(),
-      Description: isRenewal ? "تمدید اشتراک Pro" : "خرید اشتراک Pro",
-      Email: "user@example.com", // اختیاری طبق مستندات
-      Mobile: "09120000000",     // اختیاری طبق مستندات
-      CallbackURL: callbackUrl
-    };
-
-    const res = await fetch('https://tetra98.com/api/create_order', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    
-    const data = await res.json();
-    if (data.status === "100" && data.payment_url_bot) {
-      return { success: true, paymentUrl: data.payment_url_bot, hashId, authority: data.Authority };
-    }
-    return { success: false };
-  } catch (e) { 
-    console.error('Tetra create error:', e); 
-    return { success: false }; 
-  }
-}
-
 async function createNowPaymentsInvoice(env, chatId, amountUSD, planId, isRenewal = false) {
   try {
     const prefix = isRenewal ? 'renewal' : 'pro';
@@ -995,7 +926,7 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD, planId, isRenewa
     const response = await fetch('https://api.nowpayments.io/v1/invoice', {
       method: 'POST',
       headers: { 'x-api-key': env.NOWPAYMENTS_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ price_amount: amountUSD, price_currency: "usd", pay_currency: "ton", order_id: orderId, order_description: isRenewal ? "تمدید اشتراک Pro" : "اشتراک Pro", ipn_callback_url: `https://${env.WORKER_HOST || 'telegram-file-bot.gptmoone.workers.dev'}/api/nowpayments-webhook`, success_url: "https://t.me/filesmanagement_bot", cancel_url: "https://t.me/filesmanagement_bot" })
+      body: JSON.stringify({ price_amount: amountUSD, price_currency: "usd", pay_currency: "ton", order_id: orderId, order_description: isRenewal ? "تمدید اشتراک Pro" : "اشتراک Pro", ipn_callback_url: "https://telegram-file-bot.gptmoone.workers.dev/api/nowpayments-webhook", success_url: "https://t.me/filesmanagement_bot", cancel_url: "https://t.me/filesmanagement_bot" })
     });
     const data = await response.json();
     return data.invoice_url ? { success: true, invoiceUrl: data.invoice_url, orderId } : { success: false };
@@ -1201,16 +1132,12 @@ async function sendRenewalNotifications(env, TOKEN) {
       'SELECT pu.chat_id, pu.expires_at, pu.plan_snapshot FROM pro_users pu WHERE pu.expires_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM renewal_notifications rn WHERE rn.chat_id = pu.chat_id AND rn.notified_at > ?)'
     ).bind(windowStart, windowEnd, now - (notifyHours * 3600 * 2)).all();
     
-    const isTetraEnabled = await getTetraEnabled(env);
-    
     for (const user of (expiring.results || [])) {
       const chatId = user.chat_id;
       let planName = 'استاندارد';
       let planId = null;
       let starsPrice = await getEffectiveStarsPrice(env);
       let usdPrice = await getEffectiveUsdPrice(env);
-      let irrPrice = await getEffectiveIrrPrice(env);
-      
       if (user.plan_snapshot) {
         try {
           const ps = JSON.parse(user.plan_snapshot);
@@ -1218,34 +1145,24 @@ async function sendRenewalNotifications(env, TOKEN) {
           planId = ps.plan_id || null;
           if (planId) {
             const plan = await getProPlanById(env, planId);
-            if (plan) { 
-                starsPrice = plan.stars_price; 
-                usdPrice = plan.usd_price; 
-                irrPrice = plan.irr_price !== undefined ? plan.irr_price : irrPrice;
-            }
+            if (plan) { starsPrice = plan.stars_price; usdPrice = plan.usd_price; }
           }
         } catch {}
       }
       if (renewalDiscount > 0) {
         starsPrice = Math.round(starsPrice * (1 - renewalDiscount / 100));
         usdPrice = parseFloat((usdPrice * (1 - renewalDiscount / 100)).toFixed(2));
-        irrPrice = Math.round(irrPrice * (1 - renewalDiscount / 100));
       }
       const hoursLeft = Math.round((user.expires_at - now) / 3600);
       const starsInv = await createStarsInvoiceLink(env, chatId, starsPrice, planId, true);
       const usdInv = await createNowPaymentsInvoice(env, chatId, usdPrice, planId, true);
-      let tetraInv = { success: false };
-      if (isTetraEnabled) tetraInv = await createTetraInvoiceLink(env, chatId, irrPrice, planId, true);
-      
       const rows = [];
       if (renewalDiscount > 0) {
         if (starsInv.success) rows.push([{ text: `⭐️ تمدید با Stars — ${starsPrice} (${renewalDiscount}٪ تخفیف)`, url: starsInv.invoiceLink }]);
         if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$ (${renewalDiscount}٪ تخفیف)`, url: usdInv.invoiceUrl }]);
-        if (tetraInv.success) rows.push([{ text: `💳 تمدید ریالی — ${irrPrice.toLocaleString()} تومان (${renewalDiscount}٪ تخفیف)`, url: tetraInv.paymentUrl }]);
       } else {
         if (starsInv.success) rows.push([{ text: `⭐️ تمدید با Stars — ${starsPrice}`, url: starsInv.invoiceLink }]);
         if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$`, url: usdInv.invoiceUrl }]);
-        if (tetraInv.success) rows.push([{ text: `💳 تمدید ریالی — ${irrPrice.toLocaleString()} تومان`, url: tetraInv.paymentUrl }]);
       }
       rows.push([colorBtn("👑 مشاهده پلن‌ها", "pro_info", "primary")]);
       
@@ -1270,6 +1187,7 @@ async function sendRenewalNotifications(env, TOKEN) {
     }
   } catch (e) { console.error('sendRenewalNotifications error:', e); }
 }
+
 
 
 
@@ -1394,19 +1312,10 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
     
     const normalVolMB = await getNormalDailyVolumeMB(env);
     const plans = await getProPlans(env);
-    const isTetraEnabled = await getTetraEnabled(env);
     const planRows = [];
     
     for (const plan of plans.slice(0, 3)) {
-      const planRow = [
-          { text: `⭐️ ${plan.name} — ${plan.stars_price} Stars`, callback_data: `buy_plan_stars:${plan.id}` }, 
-          { text: `💰 ${plan.usd_price}$`, callback_data: `buy_plan_usd:${plan.id}` }
-      ];
-      planRows.push(planRow);
-      // اضافه کردن دکمه ریالی به صورت سطر جدا اگر تترا فعال باشد
-      if (isTetraEnabled) {
-          planRows.push([ { text: `💳 پرداخت ریالی — ${(plan.irr_price !== undefined ? plan.irr_price : await getEffectiveIrrPrice(env)).toLocaleString()} تومان`, callback_data: `buy_plan_irr:${plan.id}` } ]);
-      }
+      planRows.push([{ text: `⭐️ ${plan.name} — ${plan.stars_price} Stars`, callback_data: `buy_plan_stars:${plan.id}` }, { text: `💰 ${plan.usd_price}$`, callback_data: `buy_plan_usd:${plan.id}` }]);
     }
     planRows.push([colorBtn("❌ لغو", "cancel_input", "danger")]);
     
@@ -1435,7 +1344,7 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
 
 
 // ============================================================
-// نمایش پلن‌های Pro به کاربر با پشتیبانی از کد تخفیف و درگاه ریالی
+// نمایش پلن‌های Pro به کاربر با پشتیبانی از کد تخفیف
 // ============================================================
 
 async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon) {
@@ -1464,23 +1373,16 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
   const plans = await getProPlans(env);
   const baseStars = await getEffectiveStarsPrice(env);
   const baseUsd = await getEffectiveUsdPrice(env);
-  const baseIrr = await getEffectiveIrrPrice(env);
   const globalDiscount = await getDiscountSettings(env);
-  const isTetraEnabled = await getTetraEnabled(env);
 
   if (!plans || plans.length === 0) {
     const sa = globalDiscount ? globalDiscount.starsPrice : baseStars;
     const ua = globalDiscount ? globalDiscount.usdPrice : baseUsd;
-    const irra = globalDiscount && globalDiscount.irrPrice ? globalDiscount.irrPrice : baseIrr;
     const si = await createStarsInvoiceLink(env, chatId, sa, null);
     const ci = await createNowPaymentsInvoice(env, chatId, ua, null);
-    let ti = { success: false };
-    if (isTetraEnabled) ti = await createTetraInvoiceLink(env, chatId, irra, null);
-
     const rows = [];
     if (si.success) rows.push([colorBtn(`⭐️ خرید با Stars — ${sa} Stars`, si.invoiceLink, "primary")]);
     if (ci.success) rows.push([colorBtn(`💰 ارز دیجیتال — ${ua} USD`, ci.invoiceUrl, "success")]);
-    if (ti.success) rows.push([colorBtn(`💳 پرداخت ریالی — ${irra.toLocaleString()} تومان`, ti.paymentUrl, "success")]);
     rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
     if (rows.length === 1) {
       if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, "❌ روش پرداختی در دسترس نیست.", MAIN_KEYBOARD, TOKEN);
@@ -1494,9 +1396,9 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
     let msg = `⭐️ <b>عضویت Pro</b>\n\n🎁 مزایا:\n• دانلود با اینترنت ملی و صرفه‌جویی در حجم VPN\n• نگهداری فایل تا <b>۱ روز</b> (کاربران عادی: ۱ ساعت)\n• اولویت در صف\n• <b>${DAILY_LIMIT_PRO} فایل (۳ مستقیم) و ${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز (عادی: ${normalDailyFiles} فایل و ${normalDailyDirect} مستقیم و ${normalVolMB} مگابایت)\n• حداکثر حجم هر فایل: ${proFileSizeMB} مگابایت\n\n💰 هزینه:\n`;
     if (globalDiscount) {
       const tl = Math.max(0, Math.round((globalDiscount.expiresAt - Math.floor(Date.now() / 1000)) / 60));
-      msg += `\n🎉 <b>تخفیف ویژه</b> ⏰ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'} باقیمانده\n<s>${baseStars} Stars | ${baseUsd}$ ${isTetraEnabled ? `| ${baseIrr.toLocaleString()} تومان` : ''}</s>  ➡️  <b>${sa} Stars | ${ua}$ ${isTetraEnabled ? `| ${irra.toLocaleString()} تومان` : ''}</b>`;
+      msg += `\n🎉 <b>تخفیف ویژه</b> ⏰ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'} باقیمانده\n<s>${baseStars} Stars | ${baseUsd}$</s>  ➡️  <b>${sa} Stars | ${ua}$</b>`;
     } else {
-      msg += `• Stars: <b>${sa} Stars</b>\n• ارز دیجیتال: <b>${ua} USD</b>${isTetraEnabled ? `\n• ریالی: <b>${irra.toLocaleString()} تومان</b>` : ''}`;
+      msg += `• Stars: <b>${sa} Stars</b>\n• ارز دیجیتال: <b>${ua} USD</b>`;
     }
     if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msg, { inline_keyboard: rows }, TOKEN);
     else await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
@@ -1510,9 +1412,6 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
     const starsPrice = planDiscount ? Math.round(plan.stars_price * (1 - planDiscount.discount_percent / 100)) : plan.stars_price;
     const usdPrice = planDiscount ?
     parseFloat((plan.usd_price * (1 - planDiscount.discount_percent / 100)).toFixed(2)) : plan.usd_price;
-    const planIrrPrice = plan.irr_price !== undefined ? plan.irr_price : await getEffectiveIrrPrice(env);
-    const irrPrice = planDiscount ? Math.round(planIrrPrice * (1 - planDiscount.discount_percent / 100)) : planIrrPrice;
-
     const maxFileMB = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
     if (planDiscount) {
       const tl = Math.max(0, Math.round((planDiscount.expires_at - Math.floor(Date.now() / 1000)) / 60));
@@ -1520,20 +1419,17 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
       msg += `   📅 مدت: ${plan.duration_days} روز\n`;
       msg += `   📁 ${plan.daily_files} کل | 🚀 ${plan.daily_direct_files} مستقیم/روز | 💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n`;
       msg += `   🎉 تخفیف ${planDiscount.discount_percent}٪ | ⏰ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'}\n`;
-      msg += `   💰 <s>${plan.stars_price} Stars | ${plan.usd_price}$ ${isTetraEnabled ? `| ${planIrrPrice.toLocaleString()} تومان` : ''}</s>  ➡️  <b>${starsPrice} Stars | ${usdPrice}$ ${isTetraEnabled ? `| ${irrPrice.toLocaleString()} تومان` : ''}</b>\n\n`;
+      msg += `   💰 <s>${plan.stars_price} Stars | ${plan.usd_price}$</s>  ➡️  <b>${starsPrice} Stars | ${usdPrice}$</b>\n\n`;
     } else {
       msg += `🔹 <b>${plan.name}</b>\n`;
       msg += `   📅 مدت: ${plan.duration_days} روز\n`;
       msg += `   📁 ${plan.daily_files} کل | 🚀 ${plan.daily_direct_files} مستقیم/روز | 💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n`;
-      msg += `   💰 ${plan.stars_price} Stars | ${plan.usd_price}$ ${isTetraEnabled ? `| ${planIrrPrice.toLocaleString()} تومان` : ''}\n\n`;
+      msg += `   💰 ${plan.stars_price} Stars | ${plan.usd_price}$\n\n`;
     }
     rows.push([
         colorBtn(`${planDiscount ? '🎉' : '⭐️'} ${plan.name} — ${starsPrice} Stars`, `buy_plan_stars:${plan.id}`, "primary"), 
         colorBtn(`💰 ${usdPrice}$`, `buy_plan_usd:${plan.id}`, "success")
     ]);
-    if (isTetraEnabled) {
-      rows.push([colorBtn(`💳 پرداخت ریالی — ${irrPrice.toLocaleString()} تومان`, `buy_plan_irr:${plan.id}`, "success")]);
-    }
   }
   rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
   if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msg, { inline_keyboard: rows }, TOKEN);
@@ -1548,7 +1444,7 @@ async function ensureTables(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_temp_state (chat_id TEXT PRIMARY KEY, state_data TEXT, updated_at INTEGER)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS broadcast_state (admin_chat_id TEXT PRIMARY KEY, total INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, status TEXT DEFAULT 'idle', message_id INTEGER, start_time INTEGER, updated_at INTEGER)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pro_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, duration_days INTEGER NOT NULL, daily_files INTEGER NOT NULL, daily_direct_files INTEGER DEFAULT 3, daily_volume_gb REAL NOT NULL, stars_price INTEGER NOT NULL, usd_price REAL NOT NULL, irr_price INTEGER DEFAULT 500000, max_file_size_mb INTEGER DEFAULT 2048, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pro_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, duration_days INTEGER NOT NULL, daily_files INTEGER NOT NULL, daily_direct_files INTEGER DEFAULT 3, daily_volume_gb REAL NOT NULL, stars_price INTEGER NOT NULL, usd_price REAL NOT NULL, max_file_size_mb INTEGER DEFAULT 2048, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS plan_discounts (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER NOT NULL, discount_percent REAL NOT NULL, active INTEGER DEFAULT 1, expires_at INTEGER NOT NULL)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS oversized_pending (chat_id TEXT PRIMARY KEY, file_url TEXT, file_size INTEGER, password TEXT, branch_name TEXT, created_at INTEGER)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS renewal_notifications (chat_id TEXT PRIMARY KEY, notified_at INTEGER)`).run();
@@ -1560,12 +1456,9 @@ async function ensureTables(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (chat_id TEXT PRIMARY KEY, first_seen INTEGER, name TEXT)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_limits (chat_id TEXT PRIMARY KEY, file_count INTEGER DEFAULT 0, direct_file_count INTEGER DEFAULT 0, reset_date INTEGER, daily_volume_bytes INTEGER)`).run();
   
-  // Alter tables safely
   try { await env.DB.prepare(`ALTER TABLE pro_users ADD COLUMN plan_snapshot TEXT`).run(); } catch {}
   try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN max_file_size_mb INTEGER DEFAULT 2048`).run(); } catch {}
   try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN daily_direct_files INTEGER DEFAULT 3`).run(); } catch {}
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN irr_price INTEGER DEFAULT 500000`).run(); } catch {} // افزودن ستون قیمت ریالی به پلن ها
-  try { await env.DB.prepare(`ALTER TABLE discount_settings ADD COLUMN irr_price INTEGER DEFAULT 500000`).run(); } catch {} // افزودن ستون قیمت ریالی به تخفیفات سراسری
   try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN password TEXT`).run(); } catch {}
   try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN branch_name TEXT`).run(); } catch {}
   try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN name TEXT`).run(); } catch {}
@@ -1586,8 +1479,6 @@ function getMainKeyboardForAdmin(adminChatId, chatId) {
   return kb;
 }
 
-
-
 // ============================================================
 // Export اصلی
 // ============================================================
@@ -1605,62 +1496,6 @@ export default {
     // ============================================================
     // API Endpoints
     // ============================================================
-
-    // ---- تایید پرداخت ریالی تترا ----
-    if (path === '/api/tetra-verify' && request.method === 'GET') {
-      try {
-        const url = new URL(request.url);
-        const status = url.searchParams.get('status');
-        const hashId = url.searchParams.get('hash_id');
-        const authority = url.searchParams.get('authority');
-        const chatId = url.searchParams.get('chat_id');
-        const planIdStr = url.searchParams.get('plan_id');
-        const planId = planIdStr ? parseInt(planIdStr) : null;
-
-        if (status === '100' && hashId && authority && chatId) {
-          const apiKey = await getTetraApiKey(env);
-          
-          // ارسال درخواست تایید به تترا
-          const verifyPayload = {
-            ApiKey: apiKey,
-            authority: authority
-          };
-          const verifyRes = await fetch('https://tetra98.com/api/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(verifyPayload)
-          });
-          const verifyData = await verifyRes.json();
-
-          // در صورت تایید نهایی از سمت درگاه
-          if (verifyData.status === "100" || verifyData.status === 100) {
-            let amountText = "پرداخت ریالی (تترا 98)";
-            if (planId) {
-              const plan = await getProPlanById(env, planId);
-              if (plan) amountText = `پرداخت ریالی - پلن ${plan.name}`;
-            }
-            
-            // فعال‌سازی پلن
-            await activateProSubscription(env, chatId, hashId, amountText, TOKEN, planId);
-            
-            return new Response('<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="text-align:center; padding: 50px; font-family: Tahoma, sans-serif; direction: rtl;"><h2>✅ پرداخت شما با موفقیت تایید شد!</h2><p>اکنون می‌توانید به ربات تلگرام بازگردید.</p></body></html>', {
-              headers: { 'Content-Type': 'text/html;charset=UTF-8' }
-            });
-          } else {
-            return new Response('<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="text-align:center; padding: 50px; font-family: Tahoma, sans-serif; direction: rtl;"><h2 style="color:red;">❌ خطا در تایید تراکنش</h2><p>پرداخت شما در سیستم ثبت نشد یا قبلا تایید شده است.</p></body></html>', {
-              headers: { 'Content-Type': 'text/html;charset=UTF-8' }
-            });
-          }
-        } else {
-          return new Response('<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="text-align:center; padding: 50px; font-family: Tahoma, sans-serif; direction: rtl;"><h2 style="color:orange;">⚠️ پرداخت لغو شد یا پارامترها نامعتبر است.</h2><p>در صورت کسر وجه، مبلغ به حساب شما بازخواهد گشت.</p></body></html>', {
-            headers: { 'Content-Type': 'text/html;charset=UTF-8' }
-          });
-        }
-      } catch (e) { 
-        console.error('Tetra verify error:', e);
-        return new Response('Error', { status: 500 }); 
-      }
-    }
 
     if (path === '/api/cleanup-branches' && request.method === 'POST') {
       try {
@@ -1850,7 +1685,9 @@ export default {
     }
 
 
-    // ============================================================
+
+
+// ============================================================
     // وب‌هوک تلگرام
     // ============================================================
 
@@ -1928,49 +1765,7 @@ export default {
           lastCallbackProcessed.set(`${chatId}_${data}`, now);
           await answerCallback(cb.id, TOKEN);
 
-          // ---- تنظیمات درگاه ریالی تترا (ادمین) ----
-          if (data === 'admin_tetra_settings') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const isEnabled = await getTetraEnabled(env);
-            const apiKey = await getTetraApiKey(env);
-            const irrPrice = await getEffectiveIrrPrice(env);
-            
-            const kb = {
-              inline_keyboard: [
-                [colorBtn(isEnabled ? "🔴 غیرفعال کردن درگاه ریالی" : "🟢 فعال کردن درگاه ریالی", "admin_tetra_toggle", "blue")],
-                [colorBtn("🔑 تنظیم ApiKey", "admin_tetra_set_key", "primary")],
-                [colorBtn("💰 تنظیم قیمت پایه ریالی", "admin_tetra_set_base_price", "success")],
-                [colorBtn("🔙 بازگشت", "admin_panel", "danger")]
-              ]
-            };
-            await editMessage(chatId, msgId, `💳 <b>تنظیمات درگاه ریالی (Tetra 98)</b>\n\nوضعیت درگاه: ${isEnabled ? '🟢 فعال' : '🔴 غیرفعال'}\nقیمت پایه ریالی (بدون پلن): ${irrPrice.toLocaleString()} تومان\nوضعیت ApiKey: ${apiKey ? '✅ تنظیم شده' : '❌ تنظیم نشده'}`, kb, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_tetra_toggle') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const isEnabled = await getTetraEnabled(env);
-            await setBotSetting(env, 'tetra_enabled', isEnabled ? '0' : '1');
-            await editMessage(chatId, msgId, `✅ درگاه پرداخت ریالی ${isEnabled ? 'غیرفعال' : 'فعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_tetra_set_key') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            await dbSetAdminState(env, chatId, { step: 'awaiting_tetra_api_key' });
-            await editMessage(chatId, msgId, "🔑 <b>تنظیم ApiKey درگاه تترا 98</b>\n\nلطفاً ApiKey دریافت شده از پنل تترا 98 را ارسال کنید:", ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-          
-          if (data === 'admin_tetra_set_base_price') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            await dbSetAdminState(env, chatId, { step: 'awaiting_tetra_base_price' });
-            const currentIrr = await getEffectiveIrrPrice(env);
-            await editMessage(chatId, msgId, `💰 <b>تنظیم قیمت پایه ریالی</b>\n\nقیمت فعلی: ${currentIrr.toLocaleString()} تومان\n\nلطفاً مبلغ جدید را به تومان (فقط عدد) ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- دریافت لینک جدید (نمایش تاییدیه حذف) ----
+          // ---- بررسی دریافت لینک جدید (نمایش تاییدیه حذف) ----
           if (data === 'new_link_check') {
             const lb = await dbGetLastBranch(env, chatId);
             const state = await dbGetUserState(env, chatId);
@@ -2149,7 +1944,6 @@ export default {
             const settings = await getBotSettings(env);
             const starsP = await getEffectiveStarsPrice(env);
             const usdP = await getEffectiveUsdPrice(env);
-            const irrP = await getEffectiveIrrPrice(env);
             const normalVolMB = await getNormalDailyVolumeMB(env);
             const normalDailyFiles = await getNormalDailyFiles(env);
             const normalDailyDirect = await getNormalDailyDirectFiles(env);
@@ -2159,7 +1953,6 @@ export default {
             const proSizeMB = settings['pro_file_size_limit_mb'] || '2048';
             const maintenanceOn = settings['maintenance_mode'] === '1';
             const directEnabled = await getDirectUploadEnabled(env);
-            const tetraEnabled = settings['tetra_enabled'] === '1';
             const exceptions = settings['maintenance_exceptions'] ? JSON.parse(settings['maintenance_exceptions']) : [];
             const plansCount = (await getProPlans(env)).length;
             const activeCount = await dbGetActiveCount(env);
@@ -2179,7 +1972,7 @@ export default {
               `🔗 کل لینک‌ها: ${globalStats.total_links} | 💾 حجم کل دانلود شده: ${globalStats.total_volume_gb.toFixed(2)} GB\n` +
               `📦 حجم مخزن: ${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} GB\n\n` +
               `💰 <b>قیمت‌های پایه:</b>\n` +
-              `   Stars: ${starsP} | 💵 دلار: ${usdP}$ | 💳 ریالی: ${irrP.toLocaleString()} تومان\n\n` +
+              `   Stars: ${starsP} | 💵 دلار: ${usdP}$\n\n` +
               `📦 <b>محدودیت‌های کاربران عادی:</b>\n` +
               `   📁 فایل روزانه: ${normalDailyFiles} (مستقیم: ${normalDailyDirect})\n` +
               `   📊 حجم روزانه: ${normalVolMB} مگابایت\n` +
@@ -2195,489 +1988,6 @@ export default {
               `🎟 <b>کدهای تخفیف فعال:</b> ${totalCoupons}\n\n` +
               `🔴 <b>حالت بروزرسانی:</b> ${maintenanceOn ? 'فعال ⚡' : 'غیرفعال ✅'}\n` +
               `⚡ <b>آپلود مستقیم:</b> ${directEnabled ? 'روشن ✅' : 'خاموش ❌'}\n` +
-              `💳 <b>درگاه ریالی:</b> ${tetraEnabled ? 'روشن ✅' : 'خاموش ❌'}\n` +
-              `🧪 <b>کاربران استثنا:</b> ${exceptions.length > 0 ? exceptions.join(', ') : 'ندارد'}`,
-              ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- toggle آپلود مستقیم ----
-          if (data === 'admin_toggle_direct') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const current = await getDirectUploadEnabled(env);
-            await setBotSetting(env, 'direct_upload_enabled', current ? '0' : '1');
-            await editMessage(chatId, msgId, `✅ قابلیت ارسال مستقیم فایل ${current ? 'غیرفعال ❌' : 'فعال ✅'} شد.`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- toggle حالت بروزرسانی ----
-          if (data === 'admin_maintenance_toggle') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const current = await getMaintenanceMode(env);
-            if (!current) {
-              await dbSetAdminState(env, chatId, { step: 'awaiting_maintenance_exception' });
-              await editMessage(chatId, msgId,
-                `🔴 <b>فعال‌سازی حالت بروزرسانی</b>\n\nچت آی دی کاربر آزمایشی (استثنا) را وارد کنید:\nبرای چند کاربر، با کاما جدا کنید: <code>123456,789012</code>\nبرای رد کردن: ارسال کنید <code>skip</code>`,
-                ADMIN_KEYBOARD, TOKEN);
-            } else {
-              await setBotSetting(env, 'maintenance_mode', '0');
-              await editMessage(chatId, msgId, "✅ حالت بروزرسانی <b>غیرفعال</b> شد.\n\nربات به حالت عادی بازگشت.", ADMIN_KEYBOARD, TOKEN);
-            }
-            return new Response('OK');
-          }
-
-          // ---- تنظیمات رفرال (ادمین) ----
-          if (data === 'admin_referral_settings') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const settings = await getReferralSettings(env);
-            const kb = { inline_keyboard: [
-              [colorBtn(settings.enabled ? "🔴 غیرفعال کردن رفرال" : "🟢 فعال کردن رفرال", "admin_referral_toggle", "blue")],
-              [colorBtn("🎯 تنظیم تیرها (Tiers) مرحله به مرحله", "admin_referral_tiers_wizard", "primary")],
-              [colorBtn(settings.referral_buy_bonus_enabled ? "🔴 غیرفعال: جایزه خرید معرفی" : "🟢 فعال: جایزه خرید معرفی", "admin_referral_buy_bonus_toggle", "blue")],
-              [colorBtn("👑 پلن جایزه خرید معرفی", "admin_referral_buy_bonus_plan", "primary")],
-              [colorBtn("📋 مشاهده تیرهای فعلی", "admin_referral_tiers_view", "blue")],
-              [colorBtn("🔙 بازگشت", "admin_panel", "danger")]
-            ]};
-            const tiersText = settings.tiers.length > 0
-              ? settings.tiers.map(t => `• ${t.count} نفر → ${t.label} (${t.reward_type === 'discount_code' ? 'کد تخفیف ۱۰۰٪' : 'اشتراک مستقیم'})`).join('\n')
-              : 'تنظیم نشده';
-            await editMessage(chatId, msgId,
-              `🔗 <b>تنظیمات سیستم رفرال</b>\n\n` +
-              `وضعیت: ${settings.enabled ? '🟢 فعال' : '🔴 غیرفعال'}\n` +
-              `جایزه خرید معرفی: ${settings.referral_buy_bonus_enabled ? '🟢 فعال' : '🔴 غیرفعال'}\n\n` +
-              `🎯 <b>تیرهای فعلی:</b>\n${tiersText}`,
-              kb, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_referral_toggle') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const settings = await getReferralSettings(env);
-            await setBotSetting(env, 'referral_enabled', settings.enabled ? '0' : '1');
-            await editMessage(chatId, msgId, `✅ رفرال ${settings.enabled ? 'غیرفعال' : 'فعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_referral_buy_bonus_toggle') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const settings = await getReferralSettings(env);
-            await setBotSetting(env, 'referral_buy_bonus_enabled', settings.referral_buy_bonus_enabled ? '0' : '1');
-            await editMessage(chatId, msgId, `✅ جایزه خرید معرفی ${settings.referral_buy_bonus_enabled ? 'غیرفعال' : 'فعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_referral_buy_bonus_plan') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const plans = await getAllProPlans(env);
-            if (!plans.length) { await editMessage(chatId, msgId, "❌ ابتدا باید پلن Pro بسازید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-            const kb = { inline_keyboard: plans.map(p => [colorBtn(`👑 ${p.name} (${p.duration_days} روز)`, `admin_set_ref_bonus_plan:${p.id}`, "primary")]) };
-            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_referral_settings", "danger")]);
-            await editMessage(chatId, msgId, "👑 پلنی را که برای جایزه خرید معرفی می‌دهید انتخاب کنید:", kb, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data.startsWith('admin_set_ref_bonus_plan:')) {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const planId = data.split(':')[1];
-            await setBotSetting(env, 'referral_buy_bonus_plan_id', planId);
-            const plan = await getProPlanById(env, parseInt(planId));
-            await editMessage(chatId, msgId, `✅ پلن جایزه خرید معرفی روی "${plan?.name}" تنظیم شد.`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- ویزارد تنظیم تیرهای رفرال ----
-          if (data === 'admin_referral_tiers_wizard') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const settings = await getReferralSettings(env);
-            await dbSetAdminState(env, chatId, { step: 'awaiting_referral_tier_count', tiers: settings.tiers || [], editingIndex: -1 });
-            await editMessage(chatId, msgId,
-              `🎯 <b>مدیریت تیرهای رفرال</b>\n\nتیرهای فعلی:\n${settings.tiers.length > 0 ? settings.tiers.map((t, i) => `${i + 1}. ${t.count} نفر → ${t.label}`).join('\n') : 'ندارد'}\n\n➕ برای افزودن تیر جدید:\nتعداد رفرال مورد نیاز را وارد کنید:\nمثال: <code>5</code>`,
-              { inline_keyboard: [
-                ...settings.tiers.map((t, i) => ([colorBtn(`🗑 حذف تیر ${i + 1}`, `admin_delete_ref_tier:${i}`, "danger")])),
-                [colorBtn("❌ لغو", "admin_referral_settings", "danger")]
-              ]}, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_referral_tiers_view') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const settings = await getReferralSettings(env);
-            const tiersText = settings.tiers.length > 0
-              ? settings.tiers.map((t, i) => `${i + 1}. <b>${t.count} نفر</b> → ${t.label}${t.plan_id ? ` (پلن ID: ${t.plan_id})` : ` (${t.plan_days} روز رایگان)`} [${t.reward_type === 'discount_code' ? 'کد تخفیف' : 'فعال‌سازی مستقیم'}]`).join('\n')
-              : 'هیچ تیری تنظیم نشده';
-            await editMessage(chatId, msgId,
-              `📋 <b>تیرهای رفرال فعلی:</b>\n\n${tiersText}`,
-              { inline_keyboard: [[colorBtn("🔙 بازگشت", "admin_referral_settings", "danger")]] }, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data.startsWith('admin_delete_ref_tier:')) {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const idx = parseInt(data.split(':')[1]);
-            const settings = await getReferralSettings(env);
-            const tiers = [...settings.tiers];
-            if (idx >= 0 && idx < tiers.length) {
-              const removed = tiers.splice(idx, 1)[0];
-              await setBotSetting(env, 'referral_tiers', JSON.stringify(tiers));
-              await sendMessage(chatId, `✅ تیر "${removed.count} نفر → ${removed.label}" حذف شد.`, ADMIN_KEYBOARD, TOKEN);
-            }
-            return new Response('OK');
-          }
-
-          // ---- آمار رفرال (ادمین) + نام و صفحه‌بندی ----
-          if (data === 'admin_referral_stats' || data.startsWith('admin_referral_stats_page:')) {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const page = data.startsWith('admin_referral_stats_page:') ? parseInt(data.split(':')[1]) : 1;
-            const perPage = 10;
-            const topReferrers = await env.DB.prepare(
-              'SELECT r.referrer_chat_id, COUNT(*) as cnt, u.name FROM referrals r LEFT JOIN users u ON r.referrer_chat_id = u.chat_id WHERE r.valid = 1 GROUP BY r.referrer_chat_id ORDER BY cnt DESC LIMIT ? OFFSET ?'
-            ).bind(perPage, (page - 1) * perPage).all();
-            
-            const total = (await env.DB.prepare('SELECT COUNT(DISTINCT referrer_chat_id) as c FROM referrals WHERE valid = 1').first())?.c || 0;
-            const totalPages = Math.ceil(total / perPage);
-
-            let msg = `📈 <b>آمار رفرال‌ها (صفحه ${page} از ${totalPages})</b>\n\n`;
-            msg += `👥 کل معرف‌ها: ${total}\n\n`;
-            msg += `🏆 <b>برترین معرف‌ها:</b>\n`;
-            
-            const kb = { inline_keyboard: [] };
-            for (const r of (topReferrers.results || [])) {
-              const uName = r.name || 'کاربر';
-              msg += `👤 <code>${r.referrer_chat_id}</code> (${uName}) — ${r.cnt} رفرال\n`;
-              kb.inline_keyboard.push([colorBtn(`📊 جزئیات ${uName} (${r.cnt})`, `admin_referral_user:${r.referrer_chat_id}`, "primary")]);
-            }
-            
-            const navRow = [];
-            if (page > 1) navRow.push(colorBtn("◀️ قبلی", `admin_referral_stats_page:${page - 1}`, "blue"));
-            if (page < totalPages) navRow.push(colorBtn("▶️ بعدی", `admin_referral_stats_page:${page + 1}`, "blue"));
-            if (navRow.length > 0) kb.inline_keyboard.push(navRow);
-            
-            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "danger")]);
-            await editMessage(chatId, msgId, msg, kb, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data.startsWith('admin_referral_user:')) {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const targetId = data.split(':')[1];
-            // برای جزئیات هم نام کاربران جدید رو درمیاریم
-            const refs = await env.DB.prepare('SELECT r.new_user_chat_id, r.created_at, u.name FROM referrals r LEFT JOIN users u ON r.new_user_chat_id = u.chat_id WHERE r.referrer_chat_id = ? AND r.valid = 1 ORDER BY r.created_at DESC LIMIT 20').bind(targetId).all();
-            const count = refs.results?.length || 0;
-            let msg = `📊 <b>رفرال‌های کاربر <code>${targetId}</code></b>\n\nتعداد کل: ${count} (نمایش ۲۰ رفرال اخیر)\n\n`;
-            for (const r of (refs.results || [])) {
-              msg += `• <code>${r.new_user_chat_id}</code> (${r.name || 'کاربر'}) — ${new Date(r.created_at).toLocaleDateString('fa-IR')}\n`;
-            }
-            await editMessage(chatId, msgId, msg, { inline_keyboard: [[colorBtn("🔙 بازگشت", "admin_referral_stats", "danger")]] }, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- مدیریت کدهای تخفیف (ادمین) ----
-          if (data === 'admin_coupon_menu') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const coupons = await env.DB.prepare('SELECT * FROM coupons WHERE active = 1 ORDER BY created_at DESC LIMIT 10').all();
-            let msg = `🎟 <b>مدیریت کدهای تخفیف</b>\n\n`;
-            const kb = { inline_keyboard: [] };
-            if (!coupons.results || coupons.results.length === 0) {
-              msg += 'هیچ کد تخفیف فعالی وجود ندارد.\n';
-            } else {
-              for (const c of coupons.results) {
-                const nowSec = Math.floor(Date.now() / 1000);
-                const expired = c.expires_at && c.expires_at < nowSec;
-                const full = c.max_uses && c.used_count >= c.max_uses;
-                msg += `${expired || full ? '❌' : '✅'} <b>${c.code}</b> — ${c.discount_percent}٪\n`;
-                msg += `   استفاده: ${c.used_count}${c.max_uses ? `/${c.max_uses}` : ''} | انقضا: ${c.expires_at ? new Date(c.expires_at * 1000).toLocaleDateString('fa-IR') : 'ندارد'}\n`;
-                kb.inline_keyboard.push([colorBtn(`🗑 حذف ${c.code}`, `admin_delete_coupon:${c.code}`, "danger")]);
-              }
-            }
-            kb.inline_keyboard.push([colorBtn("➕ ایجاد کد تخفیف", "admin_create_coupon", "success")]);
-            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "primary")]);
-            await editMessage(chatId, msgId, msg, kb, TOKEN);
-            return new Response('OK');
-          }
-
-// ============================================================
-        // Callback queries
-        // ============================================================
-
-        if (update.callback_query) {
-          let cb = update.callback_query;
-          const chatId = cb.message.chat.id.toString();
-          const msgId = cb.message.message_id;
-          let data = cb.data;
-          const now = Date.now();
-          const lastTime = lastCallbackProcessed.get(`${chatId}_${data}`) || 0;
-          if (now - lastTime < 3000) { await answerCallback(cb.id, TOKEN); return new Response('OK'); }
-          lastCallbackProcessed.set(`${chatId}_${data}`, now);
-          await answerCallback(cb.id, TOKEN);
-
-          // ---- تنظیمات درگاه ریالی تترا (ادمین) ----
-          if (data === 'admin_tetra_settings') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const isEnabled = await getTetraEnabled(env);
-            const apiKey = await getTetraApiKey(env);
-            const irrPrice = await getEffectiveIrrPrice(env);
-            
-            const kb = {
-              inline_keyboard: [
-                [colorBtn(isEnabled ? "🔴 غیرفعال کردن درگاه ریالی" : "🟢 فعال کردن درگاه ریالی", "admin_tetra_toggle", "blue")],
-                [colorBtn("🔑 تنظیم ApiKey", "admin_tetra_set_key", "primary")],
-                [colorBtn("💰 تنظیم قیمت پایه ریالی", "admin_tetra_set_base_price", "success")],
-                [colorBtn("🔙 بازگشت", "admin_panel", "danger")]
-              ]
-            };
-            await editMessage(chatId, msgId, `💳 <b>تنظیمات درگاه ریالی (Tetra 98)</b>\n\nوضعیت درگاه: ${isEnabled ? '🟢 فعال' : '🔴 غیرفعال'}\nقیمت پایه ریالی (بدون پلن): ${irrPrice.toLocaleString()} تومان\nوضعیت ApiKey: ${apiKey ? '✅ تنظیم شده' : '❌ تنظیم نشده'}`, kb, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_tetra_toggle') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const isEnabled = await getTetraEnabled(env);
-            await setBotSetting(env, 'tetra_enabled', isEnabled ? '0' : '1');
-            await editMessage(chatId, msgId, `✅ درگاه پرداخت ریالی ${isEnabled ? 'غیرفعال' : 'فعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          if (data === 'admin_tetra_set_key') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            await dbSetAdminState(env, chatId, { step: 'awaiting_tetra_api_key' });
-            await editMessage(chatId, msgId, "🔑 <b>تنظیم ApiKey درگاه تترا 98</b>\n\nلطفاً ApiKey دریافت شده از پنل تترا 98 را ارسال کنید:", ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-          
-          if (data === 'admin_tetra_set_base_price') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            await dbSetAdminState(env, chatId, { step: 'awaiting_tetra_base_price' });
-            const currentIrr = await getEffectiveIrrPrice(env);
-            await editMessage(chatId, msgId, `💰 <b>تنظیم قیمت پایه ریالی</b>\n\nقیمت فعلی: ${currentIrr.toLocaleString()} تومان\n\nلطفاً مبلغ جدید را به تومان (فقط عدد) ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- دریافت لینک جدید (نمایش تاییدیه حذف) ----
-          if (data === 'new_link_check') {
-            const lb = await dbGetLastBranch(env, chatId);
-            const state = await dbGetUserState(env, chatId);
-            if (lb || state) {
-                await editMessage(chatId, msgId, "⚠️ <b>توجه:</b> شما یک فایل یا درخواست پردازش در حال انجام دارید.\n\nدر صورتی که درخواست لینک جدید بدهید، <b>فایل قبلی شما از سرور حذف خواهد شد.</b>\nآیا تایید می‌کنید؟", { inline_keyboard: [[colorBtn("✅ بله، فایل قبلی را حذف کن", "new_link", "success")], [colorBtn("❌ خیر، انصراف", "back_to_main", "danger")]] }, TOKEN);
-                return new Response('OK');
-            } else {
-                data = 'new_link'; // اجرای مستقیم دستور دریافت لینک در صورتی که فایل فعالی نداشت
-            }
-          }
-
-          // ---- خرید با کد تخفیف ----
-          if (data.startsWith('coupon_buy_stars:') || data.startsWith('coupon_buy_usd:')) {
-            const parts = data.split(':');
-            const isStar = data.startsWith('coupon_buy_stars:');
-            const planId = parseInt(parts[1]);
-            const code = parts[2];
-            const plan = await getProPlanById(env, planId);
-            const coupon = await getCouponByCode(env, code);
-            if (!plan || !coupon) {
-              await editMessage(chatId, msgId, "❌ پلن یا کد تخفیف دیگر معتبر نیست.", MAIN_KEYBOARD, TOKEN);
-              return new Response('OK');
-            }
-            const useResult = await useCoupon(env, code, chatId);
-            if (useResult.error) {
-              await sendMessage(chatId, `❌ ${useResult.error}`, MAIN_KEYBOARD, TOKEN);
-              return new Response('OK');
-            }
-            const discStars = Math.round(plan.stars_price * (1 - coupon.discount_percent / 100));
-            const discUsd = parseFloat((plan.usd_price * (1 - coupon.discount_percent / 100)).toFixed(2));
-            if (isStar) {
-              if (discStars === 0) {
-                await activateProSubscription(env, chatId, `coupon_${code}_${Date.now()}`, `کد تخفیف ${code} (رایگان)`, TOKEN, planId);
-              } else {
-                const si = await createStarsInvoiceLink(env, chatId, discStars, planId);
-                if (!si.success) { await sendMessage(chatId, "❌ خطا در ایجاد لینک پرداخت.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await sendMessage(chatId, `⭐️ <b>خرید با کد تخفیف ${code}</b>\n\n📦 ${plan.name}\n💰 قیمت نهایی: <b>${discStars} Stars</b> (${coupon.discount_percent}٪ تخفیف)`, { inline_keyboard: [[colorBtn(`⭐️ پرداخت ${discStars} Stars`, si.invoiceLink, "primary")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] }, TOKEN);
-              }
-            } else {
-              if (discUsd === 0) {
-                await activateProSubscription(env, chatId, `coupon_${code}_${Date.now()}`, `کد تخفیف ${code} (رایگان)`, TOKEN, planId);
-              } else {
-                const ci = await createNowPaymentsInvoice(env, chatId, discUsd, planId);
-                if (!ci.success) { await sendMessage(chatId, "❌ خطا در ایجاد لینک پرداخت.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await sendMessage(chatId, `💰 <b>خرید با کد تخفیف ${code}</b>\n\n📦 ${plan.name}\n💵 قیمت نهایی: <b>${discUsd}$</b> (${coupon.discount_percent}٪ تخفیف)`, { inline_keyboard: [[colorBtn(`💰 پرداخت ${discUsd}$`, ci.invoiceUrl, "success")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] }, TOKEN);
-              }
-            }
-            return new Response('OK');
-          }
-
-          // ---- عضو شدم ----
-          if (data === 'check_membership') {
-            const pending = await getPendingLink(env, chatId);
-            if (!pending) {
-              await editMessage(chatId, msgId, "❌ لینک یافت نشد. دوباره ارسال کنید.", MAIN_KEYBOARD, TOKEN);
-              return new Response('OK');
-            }
-            const channels = await getRequiredChannels(env);
-            const isMember = await isUserMemberOfChannels(chatId, channels, TOKEN);
-            if (!isMember) {
-              const jkb = { inline_keyboard: [channels.map(ch => ({ text: `🔗 @${ch}`, url: `https://t.me/${ch}` })), [colorBtn("✅ عضو شدم، بررسی کن", "check_membership", "success")]] };
-              await editMessage(chatId, msgId, "❌ هنوز در همه کانال‌ها عضو نشده‌اید.", jkb, TOKEN);
-              await savePendingLink(env, chatId, pending.url, pending.fileSize);
-            } else {
-              await processPendingLink(env, chatId, pending.url, pending.fileSize || 0, TOKEN);
-            }
-            return new Response('OK');
-          }
-
-          // ---- منوی رفرال ----
-          if (data === 'referral_menu') {
-            const settings = await getReferralSettings(env);
-            const refLink = await getReferralLink(env, chatId);
-            const count = await getReferralCount(env, chatId);
-            const tiers = settings.tiers || [];
-            let nextTier = null;
-            let claimable = false;
-            for (const tier of [...tiers].sort((a, b) => a.count - b.count)) {
-              if (count < tier.count) { nextTier = tier; break; }
-              const alreadyClaimed = await env.DB.prepare('SELECT id FROM referral_rewards WHERE chat_id = ? AND tier_count = ? AND claimed = 1').bind(chatId, tier.count).first();
-              if (!alreadyClaimed) { claimable = true; break; }
-            }
-            let msg = `🎁 <b>اشتراک رایگان Pro با دعوت دوستان</b>\n\n`;
-            msg += `🔗 <b>لینک اختصاصی شما:</b>\n<code>${refLink}</code>\n\n`;
-            msg += `👥 تعداد دعوت‌های معتبر شما: <b>${count} نفر</b>\n\n`;
-            if (tiers.length > 0) {
-              msg += `🎯 <b>جوایز دعوت:</b>\n`;
-              for (const tier of [...tiers].sort((a, b) => a.count - b.count)) {
-                const claimed = await env.DB.prepare('SELECT id FROM referral_rewards WHERE chat_id = ? AND tier_count = ? AND claimed = 1').bind(chatId, tier.count).first();
-                msg += `${claimed ? '✅' : count >= tier.count ? '🎁' : '⬜'} ${tier.count} نفر → ${tier.label}\n`;
-              }
-              msg += `\n`;
-            }
-            if (nextTier && !claimable) {
-              msg += `📊 تا جایزه بعدی: <b>${nextTier.count - count} نفر دیگر</b>`;
-            }
-            const kb = { inline_keyboard: [] };
-            if (claimable) kb.inline_keyboard.push([colorBtn("🎁 دریافت جایزه / پاداش رفرال", "claim_referral_reward", "success")]);
-            kb.inline_keyboard.push([{ text: "📤 ارسال لینک برای دوستان", switch_inline_query: `دعوت‌نامه ربات دانلودر:\n${refLink}` }]);
-            kb.inline_keyboard.push([colorBtn("📋 کپی لینک", "copy_referral_link", "blue")]);
-            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
-            await editMessage(chatId, msgId, msg, kb, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- کپی لینک رفرال ----
-          if (data === 'copy_referral_link') {
-            const refLink = await getReferralLink(env, chatId);
-            await sendMessage(chatId,
-              `📋 <b>لینک دعوت شما:</b>\n\n<code>${refLink}</code>\n\nروی لینک بالا ضربه بزنید تا کپی شود، سپس برای دوستانتان ارسال کنید! 🎁`,
-              { inline_keyboard: [[colorBtn("🔙 بازگشت به رفرال", "referral_menu", "primary")]] }, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- دریافت جایزه رفرال ----
-          if (data === 'claim_referral_reward') {
-            await claimReferralReward(env, chatId, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- استفاده از کد تخفیف ----
-          if (data === 'use_discount_code') {
-            await dbDeleteAdminState(env, chatId);
-            await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_code', isUser: true });
-            await editMessage(chatId, msgId, `🏷 <b>استفاده از کد تخفیف</b>\n\nکد تخفیف خود را وارد کنید:`, { inline_keyboard: [[colorBtn("❌ لغو", "cancel_coupon_input", "danger")]] }, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- لغو ورود کد تخفیف ----
-          if (data === 'cancel_coupon_input') {
-            await dbDeleteAdminState(env, chatId);
-            await editMessage(chatId, msgId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- لغو oversized ----
-          if (data === 'cancel_oversized') {
-            const overPend = await env.DB.prepare('SELECT branch_name FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
-            if (overPend?.branch_name) {
-              await deleteBranchFromGitHub(env, overPend.branch_name);
-              await dbRemoveActiveBranch(env, overPend.branch_name);
-            }
-            await env.DB.prepare('DELETE FROM oversized_pending WHERE chat_id = ?').bind(chatId).run();
-            await dbDeleteUserState(env, chatId);
-            await editMessage(chatId, msgId, "✅ فایل از سرور حذف شد.", MAIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- لغو ----
-          if (data === 'cancel_input') {
-            await dbDeleteUserState(env, chatId);
-            await dbRemoveFromQueue(env, chatId);
-            await dbDeleteAdminState(env, chatId);
-            await editMessage(chatId, msgId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- منوی اصلی ----
-          if (data === 'back_to_main') {
-            await dbDeleteAdminState(env, chatId);
-            await editMessage(chatId, msgId, "🌀 منوی اصلی", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- پنل مدیریت ----
-          if (data === 'admin_panel') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            await dbDeleteAdminState(env, chatId);
-            await editMessage(chatId, msgId, "🛠 <b>پنل مدیریت ربات</b>", ADMIN_KEYBOARD, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- مانیتورینگ ----
-          if (data === 'admin_monitoring') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const settings = await getBotSettings(env);
-            const starsP = await getEffectiveStarsPrice(env);
-            const usdP = await getEffectiveUsdPrice(env);
-            const irrP = await getEffectiveIrrPrice(env);
-            const normalVolMB = await getNormalDailyVolumeMB(env);
-            const normalDailyFiles = await getNormalDailyFiles(env);
-            const normalDailyDirect = await getNormalDailyDirectFiles(env);
-            const normalTTLh = Math.round((parseInt(settings['normal_max_time_sec'] || TTL_NORMAL)) / 3600);
-            const proTTLd = Math.round((parseInt(settings['pro_max_time_sec'] || TTL_PRO)) / 86400);
-            const normalSizeMB = settings['normal_file_size_limit_mb'] || '200';
-            const proSizeMB = settings['pro_file_size_limit_mb'] || '2048';
-            const maintenanceOn = settings['maintenance_mode'] === '1';
-            const directEnabled = await getDirectUploadEnabled(env);
-            const tetraEnabled = settings['tetra_enabled'] === '1';
-            const exceptions = settings['maintenance_exceptions'] ? JSON.parse(settings['maintenance_exceptions']) : [];
-            const plansCount = (await getProPlans(env)).length;
-            const activeCount = await dbGetActiveCount(env);
-            const queueCount = await dbGetQueueCount(env);
-            const usersCount = await dbGetUsersCount(env);
-            const proUsersCount = (await env.DB.prepare('SELECT COUNT(*) as c FROM pro_users WHERE expires_at > ?').bind(Math.floor(Date.now() / 1000)).first())?.c || 0;
-            const globalStats = await dbGetGlobalStats(env);
-            const renewalDiscount = await getRenewalDiscountPercent(env);
-            const renewalHours = await getRenewalNotifyHours(env);
-            const totalReferrals = (await env.DB.prepare('SELECT COUNT(*) as c FROM referrals WHERE valid = 1').first())?.c || 0;
-            const totalCoupons = (await env.DB.prepare('SELECT COUNT(*) as c FROM coupons WHERE active = 1').first())?.c || 0;
-            const repoSize = await getRepoSize(env);
-            await editMessage(chatId, msgId,
-              `🖥 <b>مانیتورینگ و وضعیت ربات</b>\n\n` +
-              `👥 <b>کاربران:</b> ${usersCount} | ⭐️ Pro: ${proUsersCount}\n` +
-              `🔄 در پردازش: ${activeCount} | ⏳ در صف: ${queueCount}\n` +
-              `🔗 کل لینک‌ها: ${globalStats.total_links} | 💾 حجم کل دانلود شده: ${globalStats.total_volume_gb.toFixed(2)} GB\n` +
-              `📦 حجم مخزن: ${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} GB\n\n` +
-              `💰 <b>قیمت‌های پایه:</b>\n` +
-              `   Stars: ${starsP} | 💵 دلار: ${usdP}$ | 💳 ریالی: ${irrP.toLocaleString()} تومان\n\n` +
-              `📦 <b>محدودیت‌های کاربران عادی:</b>\n` +
-              `   📁 فایل روزانه: ${normalDailyFiles} (مستقیم: ${normalDailyDirect})\n` +
-              `   📊 حجم روزانه: ${normalVolMB} مگابایت\n` +
-              `   📏 حجم هر فایل: ${normalSizeMB} مگابایت\n` +
-              `   ⏱ ماندگاری: ${normalTTLh} ساعت\n\n` +
-              `👑 <b>محدودیت‌های Pro (پیش‌فرض):</b>\n` +
-              `   📏 حجم هر فایل: ${proSizeMB} مگابایت\n` +
-              `   ⏱ ماندگاری: ${proTTLd} روز\n\n` +
-              `👑 <b>پلن‌های Pro:</b> ${plansCount} پلن فعال\n\n` +
-              `🔔 <b>تخفیف تمدید:</b> ${renewalDiscount > 0 ? renewalDiscount + '٪' : 'غیرفعال'}\n` +
-              `⏰ <b>نوتیف انقضا:</b> ${renewalHours} ساعت قبل\n\n` +
-              `🎁 <b>رفرال‌های معتبر کل:</b> ${totalReferrals}\n` +
-              `🎟 <b>کدهای تخفیف فعال:</b> ${totalCoupons}\n\n` +
-              `🔴 <b>حالت بروزرسانی:</b> ${maintenanceOn ? 'فعال ⚡' : 'غیرفعال ✅'}\n` +
-              `⚡ <b>آپلود مستقیم:</b> ${directEnabled ? 'روشن ✅' : 'خاموش ❌'}\n` +
-              `💳 <b>درگاه ریالی:</b> ${tetraEnabled ? 'روشن ✅' : 'خاموش ❌'}\n` +
               `🧪 <b>کاربران استثنا:</b> ${exceptions.length > 0 ? exceptions.join(', ') : 'ندارد'}`,
               ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
@@ -3028,7 +2338,7 @@ export default {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             await dbDeleteAdminState(env, chatId);
             await dbSetAdminState(env, chatId, { step: 'awaiting_plan_name' });
-            await editMessage(chatId, msgId, "➕ <b>افزودن پلن جدید Pro</b>\n\nمرحله ۱ از ۹: نام پلن را ارسال کنید:\nمثال: <code>ماهانه ویژه</code>", ADMIN_KEYBOARD, TOKEN);
+            await editMessage(chatId, msgId, "➕ <b>افزودن پلن جدید Pro</b>\n\nمرحله ۱ از ۸: نام پلن را ارسال کنید:\nمثال: <code>ماهانه ویژه</code>", ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
@@ -3039,7 +2349,7 @@ export default {
             if (!plan) { await editMessage(chatId, msgId, "❌ پلن یافت نشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
             await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_name', planId });
             await editMessage(chatId, msgId,
-              `✏️ <b>ویرایش پلن: ${plan.name}</b>\n\nمرحله ۱ از ۹: نام جدید پلن را ارسال کنید:\n(یا <code>-</code> برای نگه‌داشتن "<b>${plan.name}</b>")`,
+              `✏️ <b>ویرایش پلن: ${plan.name}</b>\n\nمرحله ۱ از ۸: نام جدید پلن را ارسال کنید:\n(یا <code>-</code> برای نگه‌داشتن "<b>${plan.name}</b>")`,
               ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
@@ -3100,7 +2410,7 @@ export default {
             let msg = `🎁 <b>مدیریت تخفیف</b>\n\n`;
             if (discount) {
               const tl = Math.max(0, Math.round((discount.expiresAt - Math.floor(Date.now() / 1000)) / 60));
-              msg += `✅ تخفیف سراسری فعال است\n Stars: ${discount.starsPrice} | 💵 ${discount.usdPrice}$ | 💳 ${discount.irrPrice ? discount.irrPrice.toLocaleString() : 'تنظیم نشده'} تومان\n⏳ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'} باقیمانده\n\n`;
+              msg += `✅ تخفیف سراسری فعال است\n Stars: ${discount.starsPrice} | 💵 ${discount.usdPrice}$\n⏳ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'} باقیمانده\n\n`;
             } else {
               msg += `❌ تخفیف سراسری فعال نیست\n\n`;
             }
@@ -3209,7 +2519,7 @@ export default {
           if (data === 'admin_set_discount') {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             await dbSetAdminState(env, chatId, { step: 'awaiting_discount_duration' });
-            await editMessage(chatId, msgId, "🎁 <b>تنظیم تخفیف سراسری</b>\n\nمرحله ۱ از ۴: مدت اعتبار تخفیف را به ساعت وارد کنید:\nمثال: <code>24</code>", ADMIN_KEYBOARD, TOKEN);
+            await editMessage(chatId, msgId, "🎁 <b>تنظیم تخفیف سراسری</b>\n\nمرحله ۱ از ۳: مدت اعتبار تخفیف را به ساعت وارد کنید:\nمثال: <code>24</code>", ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
@@ -3271,25 +2581,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---- خرید پلن ریالی تترا ----
-          if (data.startsWith('buy_plan_irr:')) {
-            const planId = parseInt(data.split(':')[1]);
-            const plan = await getProPlanById(env, planId);
-            if (!plan || !plan.is_active) { await editMessage(chatId, msgId, "❌ این پلن در دسترس نیست.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-            const planDiscount = await getPlanDiscountForPlan(env, planId);
-            const planIrrPrice = plan.irr_price !== undefined ? plan.irr_price : await getEffectiveIrrPrice(env);
-            const irrPrice = planDiscount ? Math.round(planIrrPrice * (1 - planDiscount.discount_percent / 100)) : planIrrPrice;
-            const maxFileMB = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
-            
-            const ti = await createTetraInvoiceLink(env, chatId, irrPrice, planId);
-            if (!ti.success) { await editMessage(chatId, msgId, "❌ خطا در ایجاد لینک پرداخت ریالی.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-            const kb = { inline_keyboard: [[colorBtn(`💳 پرداخت ${irrPrice.toLocaleString()} تومان`, ti.paymentUrl, "success")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
-            await editMessage(chatId, msgId, `💳 <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💳 قیمت ریالی: <b>${irrPrice.toLocaleString()} تومان</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
-            return new Response('OK');
-          }
-
-          
-// ---- Pro info ----
+          // ---- Pro info ----
           if (data === 'pro_info') {
             await showProPlansToUser(env, chatId, msgId, TOKEN);
             return new Response('OK');
@@ -3301,31 +2593,20 @@ export default {
             if (isPro) { await editMessage(chatId, msgId, "✅ شما از قبل Pro هستید.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
             const discount = await getDiscountSettings(env);
             if (!discount) { await showProPlansToUser(env, chatId, msgId, TOKEN); return new Response('OK'); }
-            
-            const isTetraEnabled = await getTetraEnabled(env);
             const si = await createStarsInvoiceLink(env, chatId, discount.starsPrice, null);
             const ci = await createNowPaymentsInvoice(env, chatId, discount.usdPrice, null);
-            let ti = { success: false };
-            if (isTetraEnabled && discount.irrPrice) ti = await createTetraInvoiceLink(env, chatId, discount.irrPrice, null);
-            
             const rows = [];
             if (si.success) rows.push([colorBtn(`⭐️ Stars — ${discount.starsPrice} Stars`, si.invoiceLink, "primary")]);
             if (ci.success) rows.push([colorBtn(`💰 ارز دیجیتال — ${discount.usdPrice} USD`, ci.invoiceUrl, "success")]);
-            if (ti.success) rows.push([colorBtn(`💳 پرداخت ریالی — ${discount.irrPrice.toLocaleString()} تومان`, ti.paymentUrl, "success")]);
             rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
             if (rows.length === 1) { await editMessage(chatId, msgId, "❌ خطا در لینک پرداخت.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-            
             const tl = Math.max(0, Math.round((discount.expiresAt - Math.floor(Date.now() / 1000)) / 60));
             const baseStars = await getEffectiveStarsPrice(env);
             const baseUsd = await getEffectiveUsdPrice(env);
-            const baseIrr = await getEffectiveIrrPrice(env);
             const normalDailyFiles = await getNormalDailyFiles(env);
             const normalDailyDirect = await getNormalDailyDirectFiles(env);
             const normalVolMB = await getNormalDailyVolumeMB(env);
-            
-            let priceText = `<s>${baseStars} Stars | ${baseUsd}$ ${isTetraEnabled ? `| ${baseIrr.toLocaleString()} تومان` : ''}</s>\n<b>${discount.starsPrice} Stars | ${discount.usdPrice}$ ${isTetraEnabled ? `| ${discount.irrPrice.toLocaleString()} تومان` : ''}</b>`;
-            
-            await editMessage(chatId, msgId, `🎁 <b>اشتراک Pro با تخفیف ویژه</b>\n⏰ باقیمانده: ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'}\n\n${priceText}\n\n✨ نگهداری ۱ روز | اولویت صف | ${DAILY_LIMIT_PRO} فایل (۳ مستقیم) در روز\n\nکاربران عادی: ${normalDailyFiles} فایل (${normalDailyDirect} مستقیم) و ${normalVolMB} مگابایت در روز`, { inline_keyboard: rows }, TOKEN);
+            await editMessage(chatId, msgId, `🎁 <b>اشتراک Pro با تخفیف ویژه</b>\n⏰ باقیمانده: ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'}\n\n<s>${baseStars} Stars | ${baseUsd}$</s>\n<b>${discount.starsPrice} Stars | ${discount.usdPrice}$</b>\n\n✨ نگهداری ۱ روز | اولویت صف | ${DAILY_LIMIT_PRO} فایل (۳ مستقیم) در روز\n\nکاربران عادی: ${normalDailyFiles} فایل (${normalDailyDirect} مستقیم) و ${normalVolMB} مگابایت در روز`, { inline_keyboard: rows }, TOKEN);
             return new Response('OK');
           }
 
@@ -3371,7 +2652,7 @@ export default {
               `• روی فایل <b>archive.7z.001</b> کلیک راست کرده و گزینه <b>Extract Here</b> را انتخاب کنید.\n` +
               `• نرم‌افزار به صورت خودکار تمام تکه‌ها را به هم چسبانده و فایل اصلی شما را تحویل می‌دهد.\n\n` +
               `⚠️ <b>توجه امنیتی و قانونی:</b>\n` +
-              `• فایل‌ها در یک <b>مخزن عمومی GitHub</b> ذخیره গঠন می‌شوند. از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.\n` +
+              `• فایل‌ها در یک <b>مخزن عمومی GitHub</b> ذخیره می‌شوند. از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.\n` +
               `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b>\n` +
               `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران می‌شوید.\n\n` +
               `📊 <b>محدودیت‌های فعلی:</b>\n` +
@@ -3473,7 +2754,7 @@ export default {
             return new Response('OK');
           }
 
-          // ---- لینک جدید ----
+          // ---- لینک جدید (باگ حذف خودکار قبلی برطرف شد) ----
           if (data === 'new_link') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
@@ -3558,28 +2839,18 @@ export default {
             if (coupon.max_uses) msg += `👥 استفاده: ${coupon.used_count}/${coupon.max_uses}\n`;
             if (coupon.expires_at) msg += `⏳ انقضا: ${new Date(coupon.expires_at * 1000).toLocaleDateString('fa-IR')}\n`;
             msg += `\n👑 <b>پلن‌های قابل خرید با این کد:</b>\n\n`;
-            
-            const isTetraEnabled = await getTetraEnabled(env);
             const rows = [];
-            
             for (const plan of targetPlans) {
               const discStars = Math.round(plan.stars_price * (1 - coupon.discount_percent / 100));
               const discUsd = parseFloat((plan.usd_price * (1 - coupon.discount_percent / 100)).toFixed(2));
-              const planIrrPrice = plan.irr_price !== undefined ? plan.irr_price : await getEffectiveIrrPrice(env);
-              const discIrr = Math.round(planIrrPrice * (1 - coupon.discount_percent / 100));
-              
-              msg += `🔹 <b>${plan.name}</b>\n   <s>${plan.stars_price} Stars | ${plan.usd_price}$ ${isTetraEnabled ? `| ${planIrrPrice.toLocaleString()} تومان` : ''}</s> → <b>${discStars} Stars | ${discUsd}$ ${isTetraEnabled ? `| ${discIrr.toLocaleString()} تومان` : ''}</b>\n\n`;
-              if (discStars === 0 && discUsd === 0 && discIrr === 0) {
+              msg += `🔹 <b>${plan.name}</b>\n   <s>${plan.stars_price} Stars | ${plan.usd_price}$</s> → <b>${discStars} Stars | ${discUsd}$</b>\n\n`;
+              if (discStars === 0 && discUsd === 0) {
                 rows.push([colorBtn(`🎁 دریافت رایگان: ${plan.name}`, `coupon_buy_stars:${plan.id}:${code}`, "success")]);
               } else {
                 rows.push([
                   colorBtn(`⭐️ ${plan.name} — ${discStars} Stars`, `coupon_buy_stars:${plan.id}:${code}`, "primary"),
                   colorBtn(`💰 ${discUsd}$`, `coupon_buy_usd:${plan.id}:${code}`, "success")
                 ]);
-                if (isTetraEnabled) {
-                  // متاسفانه برای کد تخفیف ریالی مسیر مجزایی نیاز است که برای سادگی در اینجا به همون دکمه‌های بالا بسنده می‌شود، یا می‌توان اضافه کرد:
-                  // به دلیل محدودیت دیتابیس در ثبت کد تخفیف با تترا، فعلا فقط ارزی و استارز را با کد تخفیف ارائه می‌دهیم.
-                }
               }
             }
             rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
@@ -3593,26 +2864,6 @@ export default {
             if (adminState) {
               const step = adminState.step;
               
-              // تنظیمات درگاه تترا 
-              if (step === 'awaiting_tetra_api_key') {
-                const key = text.trim();
-                await setBotSetting(env, 'tetra_api_key', key);
-                await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ ApiKey درگاه تترا ذخیره شد.\n\n🔑 <code>${key}</code>`, ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-              if (step === 'awaiting_tetra_base_price') {
-                const price = parseInt(text);
-                if (isNaN(price) || price <= 0) {
-                  await sendMessage(chatId, "❌ مبلغ نامعتبر است. فقط عدد (تومان) وارد کنید:", ADMIN_KEYBOARD, TOKEN);
-                  return new Response('OK');
-                }
-                await setBotSetting(env, 'irr_price', price.toString());
-                await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ قیمت پایه ریالی به ${price.toLocaleString()} تومان تغییر یافت.`, ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-
               if (step === 'awaiting_broadcast_message') {
                 if (text === '/cancel') { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbDeleteAdminState(env, chatId);
@@ -3654,7 +2905,7 @@ export default {
                 const hours = parseInt(text);
                 if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید. مثال: 24", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_discount_stars', hours });
-                await sendMessage(chatId, `✅ مدت: ${hours} ساعت\n\nمرحله ۲ از ۴: تعداد Stars تخفیفی را ارسال کنید (عدد صحیح):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `✅ مدت: ${hours} ساعت\n\nمرحله ۲ از ۳: تعداد Stars تخفیفی را ارسال کنید (عدد صحیح):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3662,25 +2913,16 @@ export default {
                 const sp = parseInt(text);
                 if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید. مثال: 40", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_discount_usd', starsPrice: sp, hours: adminState.hours });
-                await sendMessage(chatId, `Stars: ${sp}\n\nمرحله ۳ از ۴: قیمت دلاری تخفیفی را ارسال کنید (عدد اعشاری، مثال: 0.7):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `Stars: ${sp}\n\nمرحله ۳ از ۳: قیمت دلاری تخفیفی را ارسال کنید (عدد اعشاری، مثال: 0.7):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_discount_usd') {
                 const up = parseFloat(text);
                 if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید. مثال: 0.7", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_discount_irr', starsPrice: adminState.starsPrice, usdPrice: up, hours: adminState.hours });
-                await sendMessage(chatId, `دلار: ${up}$\n\nمرحله ۴ از ۴: قیمت ریالی (تومان) تخفیفی را وارد کنید (مثال: 300000):`, ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-
-              if (step === 'awaiting_discount_irr') {
-                const irr = parseInt(text);
-                if (isNaN(irr) || irr <= 0) { await sendMessage(chatId, "❌ عدد مثبت (تومان) وارد کنید. مثال: 300000", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                // توجه: تابع setDiscount نیازمند آپدیت برای پشتیبانی از درگاه ریالی است
-                await env.DB.prepare('INSERT OR REPLACE INTO discount_settings (id, active, stars_price, usd_price, irr_price, expires_at) VALUES (1, 1, ?, ?, ?, ?)').bind(adminState.starsPrice, adminState.usdPrice, irr, Math.floor(Date.now() / 1000) + adminState.hours * 3600).run();
+                await setDiscount(env, adminState.starsPrice, up, adminState.hours);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>تخفیف سراسری تنظیم شد!</b>\n Stars: ${adminState.starsPrice} | 💰 ${adminState.usdPrice} USD | 💳 ${irr.toLocaleString()} تومان\n⏳ اعتبار: ${adminState.hours} ساعت`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `✅ <b>تخفیف سراسری تنظیم شد!</b>\n Stars: ${adminState.starsPrice} | 💰 ${up} USD\n⏳ اعتبار: ${adminState.hours} ساعت`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3695,19 +2937,10 @@ export default {
               if (step === 'awaiting_usd_price') {
                 const up = parseFloat(text);
                 if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید. مثال: 1.5", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_irr_price', starsPrice: adminState.starsPrice, usdPrice: up });
-                await sendMessage(chatId, `دلار: ${up}$\n\n💳 قیمت ریالی (تومان) را وارد کنید (مثال: 500000):`, ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-
-              if (step === 'awaiting_irr_price') {
-                const irr = parseInt(text);
-                if (isNaN(irr) || irr <= 0) { await sendMessage(chatId, "❌ عدد صحیح وارد کنید. مثال: 500000", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await setBotSetting(env, 'stars_price', adminState.starsPrice);
-                await setBotSetting(env, 'usd_price', adminState.usdPrice);
-                await setBotSetting(env, 'irr_price', irr.toString());
+                await setBotSetting(env, 'usd_price', up);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>قیمت‌های پایه بروز شد!</b>\n Stars: ${adminState.starsPrice}\n💵 دلار: ${adminState.usdPrice}$\n💳 ریالی: ${irr.toLocaleString()} تومان`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `✅ <b>قیمت‌های پایه بروز شد!</b>\n Stars: ${adminState.starsPrice}\n💵 دلار: ${up}$`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3779,7 +3012,7 @@ export default {
               // ---- مدیریت پلن‌ها ----
               if (step === 'awaiting_plan_name') {
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_duration', name: text });
-                await sendMessage(chatId, `📦 نام: <b>${text}</b>\n\nمرحله ۲ از ۹: مدت (روز) را وارد کنید:\nمثال: <code>30</code>`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📦 نام: <b>${text}</b>\n\nمرحله ۲ از ۸: مدت (روز) را وارد کنید:\nمثال: <code>30</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3787,7 +3020,7 @@ export default {
                 const days = parseInt(text);
                 if (isNaN(days) || days <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_files', name: adminState.name, days });
-                await sendMessage(chatId, `📅 مدت: ${days} روز\n\nمرحله ۳ از ۹: تعداد کل فایل مجاز روزانه را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📅 مدت: ${days} روز\n\nمرحله ۳ از ۸: تعداد کل فایل مجاز روزانه را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3795,7 +3028,7 @@ export default {
                 const files = parseInt(text);
                 if (isNaN(files) || files <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_direct_files', name: adminState.name, days: adminState.days, dailyFiles: files });
-                await sendMessage(chatId, `📁 فایل کل روزانه: ${files}\n\nمرحله ۴ از ۹: چند فایل مجاز به ارسال مستقیم است؟`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📁 فایل کل روزانه: ${files}\n\nمرحله ۴ از ۸: چند فایل مجاز به ارسال مستقیم است؟`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3803,7 +3036,7 @@ export default {
                 const files = parseInt(text);
                 if (isNaN(files) || files < 0) { await sendMessage(chatId, "❌ عدد صحیح وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_volume', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: files });
-                await sendMessage(chatId, `🚀 آپلود مستقیم: ${files}\n\nمرحله ۵ از ۹: حجم روزانه (گیگابایت) را وارد کنید:\nمثال: <code>6</code>`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `🚀 آپلود مستقیم: ${files}\n\nمرحله ۵ از ۸: حجم روزانه (گیگابایت) را وارد کنید:\nمثال: <code>6</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3811,7 +3044,7 @@ export default {
                 const gb = parseFloat(text);
                 if (isNaN(gb) || gb <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_max_file_size', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: gb });
-                await sendMessage(chatId, `💾 حجم روزانه: ${gb} گیگابایت\n\nمرحله ۶ از ۹: حداکثر حجم هر فایل (مگابایت) را وارد کنید:\nمثال: <code>2048</code>`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `💾 حجم روزانه: ${gb} گیگابایت\n\nمرحله ۶ از ۸: حداکثر حجم هر فایل (مگابایت) را وارد کنید:\nمثال: <code>2048</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3819,7 +3052,7 @@ export default {
                 const mb = parseInt(text);
                 if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (مگابایت).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_stars_price', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: mb });
-                await sendMessage(chatId, `📏 حداکثر حجم فایل: ${mb} مگابایت\n\nمرحله ۷ از ۹: قیمت به Stars را وارد کنید (عدد صحیح):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📏 حداکثر حجم فایل: ${mb} مگابایت\n\nمرحله ۷ از ۸: قیمت به Stars را وارد کنید (عدد صحیح):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3827,25 +3060,17 @@ export default {
                 const sp = parseInt(text);
                 if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_usd_price', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: sp });
-                await sendMessage(chatId, `⭐️ Stars: ${sp}\n\nمرحله ۸ از ۹: قیمت دلاری را وارد کنید (مثال: <code>1.5</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `⭐️ Stars: ${sp}\n\nمرحله ۸ از ۸: قیمت دلاری را وارد کنید (مثال: <code>1.5</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_usd_price') {
                 const up = parseFloat(text);
                 if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_plan_irr_price', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: adminState.starsPrice, usdPrice: up });
-                await sendMessage(chatId, `دلار: ${up}$\n\nمرحله ۹ از ۹: قیمت ریالی (تومان) را وارد کنید (مثال: 500000):`, ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-
-              if (step === 'awaiting_plan_irr_price') {
-                const irr = parseInt(text);
-                if (isNaN(irr) || irr <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت (تومان) وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await env.DB.prepare('INSERT INTO pro_plans (name, duration_days, daily_files, daily_direct_files, daily_volume_gb, max_file_size_mb, stars_price, usd_price, irr_price, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, adminState.usdPrice, irr).run();
+                await env.DB.prepare('INSERT INTO pro_plans (name, duration_days, daily_files, daily_direct_files, daily_volume_gb, max_file_size_mb, stars_price, usd_price, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0)').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, up).run();
                 await dbDeleteAdminState(env, chatId);
                 await sendMessage(chatId,
-                  `✅ <b>پلن جدید ایجاد شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز\n📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز\n💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${adminState.usdPrice}$ | 💳 ${irr.toLocaleString()} تومان`,
+                  `✅ <b>پلن جدید ایجاد شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز\n📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز\n💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${up}$`,
                   ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
@@ -3856,7 +3081,7 @@ export default {
                 const plan = await getProPlanById(env, planId);
                 const newName = text === '-' ? plan.name : text;
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_duration', planId, name: newName });
-                await sendMessage(chatId, `📅 نام: <b>${newName}</b>\n\nمرحله ۲ از ۹: مدت فعلی: ${plan.duration_days} روز\nمدت جدید را وارد کنید (یا <code>-</code> برای نگه‌داشتن):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📅 نام: <b>${newName}</b>\n\nمرحله ۲ از ۸: مدت فعلی: ${plan.duration_days} روز\nمدت جدید را وارد کنید (یا <code>-</code> برای نگه‌داشتن):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3866,7 +3091,7 @@ export default {
                 const newDays = text === '-' ? plan.duration_days : parseInt(text);
                 if (isNaN(newDays) || newDays <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_files', planId, name: adminState.name, days: newDays });
-                await sendMessage(chatId, `📅 مدت: ${newDays} روز\n\nمرحله ۳ از ۹: تعداد کل فایل روزانه فعلی: ${plan.daily_files}\nمقدار جدید وارد کنید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📅 مدت: ${newDays} روز\n\nمرحله ۳ از ۸: تعداد کل فایل روزانه فعلی: ${plan.daily_files}\nمقدار جدید وارد کنید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3876,7 +3101,7 @@ export default {
                 const newFiles = text === '-' ? plan.daily_files : parseInt(text);
                 if (isNaN(newFiles) || newFiles <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_direct_files', planId, name: adminState.name, days: adminState.days, dailyFiles: newFiles });
-                await sendMessage(chatId, `📁 فایل کل روزانه: ${newFiles}\n\nمرحله ۴ از ۹: تعداد مجاز ارسال مستقیم فعلی: ${plan.daily_direct_files !== undefined ? plan.daily_direct_files : 3}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📁 فایل کل روزانه: ${newFiles}\n\nمرحله ۴ از ۸: تعداد مجاز ارسال مستقیم فعلی: ${plan.daily_direct_files !== undefined ? plan.daily_direct_files : 3}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3887,7 +3112,7 @@ export default {
                 const newFiles = text === '-' ? currentDirect : parseInt(text);
                 if (isNaN(newFiles) || newFiles < 0) { await sendMessage(chatId, "❌ عدد صحیح وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_volume', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: newFiles });
-                await sendMessage(chatId, `🚀 ارسال مستقیم روزانه: ${newFiles}\n\nمرحله ۵ از ۹: حجم روزانه فعلی: ${plan.daily_volume_gb} GB\nمقدار جدید (گیگابایت، یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `🚀 ارسال مستقیم روزانه: ${newFiles}\n\nمرحله ۵ از ۸: حجم روزانه فعلی: ${plan.daily_volume_gb} GB\nمقدار جدید (گیگابایت، یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3897,7 +3122,7 @@ export default {
                 const newGB = text === '-' ? plan.daily_volume_gb : parseFloat(text);
                 if (isNaN(newGB) || newGB <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_max_file_size', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: newGB });
-                await sendMessage(chatId, `💾 حجم روزانه: ${newGB} GB\n\nمرحله ۶ از ۹: حداکثر حجم فایل فعلی: ${plan.max_file_size_mb || 2048} مگابایت\nمقدار جدید (مگابایت، یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `💾 حجم روزانه: ${newGB} GB\n\nمرحله ۶ از ۸: حداکثر حجم فایل فعلی: ${plan.max_file_size_mb || 2048} مگابایت\nمقدار جدید (مگابایت، یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3907,7 +3132,7 @@ export default {
                 const newMB = text === '-' ? (plan.max_file_size_mb || 2048) : parseInt(text);
                 if (isNaN(newMB) || newMB <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_stars_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: newMB });
-                await sendMessage(chatId, `📏 حجم فایل: ${newMB} مگابایت\n\nمرحله ۷ از ۹: Stars فعلی: ${plan.stars_price}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📏 حجم فایل: ${newMB} مگابایت\n\nمرحله ۷ از ۸: Stars فعلی: ${plan.stars_price}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3917,7 +3142,7 @@ export default {
                 const newStars = text === '-' ? plan.stars_price : parseInt(text);
                 if (isNaN(newStars) || newStars <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_usd_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: newStars });
-                await sendMessage(chatId, `⭐️ Stars: ${newStars}\n\nمرحله ۸ از ۹: قیمت دلاری فعلی: ${plan.usd_price}$\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `⭐️ Stars: ${newStars}\n\nمرحله ۸ از ۸: قیمت دلاری فعلی: ${plan.usd_price}$\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -3926,21 +3151,10 @@ export default {
                 const plan = await getProPlanById(env, planId);
                 const newUsd = text === '-' ? plan.usd_price : parseFloat(text);
                 if (isNaN(newUsd) || newUsd <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_irr_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: adminState.starsPrice, usdPrice: newUsd });
-                await sendMessage(chatId, `💵 دلار: ${newUsd}$\n\nمرحله ۹ از ۹: قیمت ریالی فعلی: ${plan.irr_price !== undefined ? plan.irr_price : 500000} تومان\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-
-              if (step === 'awaiting_plan_edit_irr_price') {
-                const planId = adminState.planId;
-                const plan = await getProPlanById(env, planId);
-                const newIrr = text === '-' ? (plan.irr_price !== undefined ? plan.irr_price : 500000) : parseInt(text);
-                if (isNaN(newIrr) || newIrr <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت (تومان) وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                
-                await env.DB.prepare('UPDATE pro_plans SET name=?, duration_days=?, daily_files=?, daily_direct_files=?, daily_volume_gb=?, max_file_size_mb=?, stars_price=?, usd_price=?, irr_price=? WHERE id=?').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, adminState.usdPrice, newIrr, planId).run();
+                await env.DB.prepare('UPDATE pro_plans SET name=?, duration_days=?, daily_files=?, daily_direct_files=?, daily_volume_gb=?, max_file_size_mb=?, stars_price=?, usd_price=? WHERE id=?').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, newUsd, planId).run();
                 await dbDeleteAdminState(env, chatId);
                 await sendMessage(chatId,
-                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${adminState.usdPrice}$ | 💳 ${newIrr.toLocaleString()} تومان\n\n⚠️ کاربران با پلن فعال تغییر نمی‌کنند (snapshot محفوظ است)`,
+                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${newUsd}$\n\n⚠️ کاربران با پلن فعال تغییر نمی‌کنند (snapshot محفوظ است)`,
                   ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
@@ -4304,17 +3518,13 @@ export default {
   }
 };
 
-          
 
 
 
-          
+    
 
 
-
-
-
-
+    
 
 
 
