@@ -35,13 +35,22 @@ const BOT_SIGNATURE = '\n\n🤖 <a href="https://t.me/filesmanagement_bot">@file
 // ============================================================
 // ساخت دکمه‌های رنگی بر اساس مستندات Bot API 9.6 (سال 2026)
 // ============================================================
-function colorBtn(text, callback_data, color) {
+function colorBtn(text, data, color) {
   let style;
-  if (color === 'blue') style = 'primary';
-  else if (color === 'green') style = 'success';
-  else if (color === 'red') style = 'danger';
-  return { text, callback_data, style };
+  // پشتیبانی از نام رنگ‌ها و نام استایل‌های استاندارد تلگرام
+  if (color === 'blue' || color === 'primary') style = 'primary';
+  else if (color === 'green' || color === 'success') style = 'success';
+  else if (color === 'red' || color === 'danger') style = 'danger';
+  
+  // اگر دیتا با http شروع شود، یعنی لینک پرداخت یا آدرس وب است
+  if (typeof data === 'string' && data.startsWith('http')) {
+    return { text, url: data, style };
+  }
+  
+  // در غیر این صورت به عنوان دکمه شیشه‌ای معمولی (callback) در نظر گرفته می‌شود
+  return { text, callback_data: data, style };
 }
+
 
 // ============================================================
 // کیبوردهای اصلی
