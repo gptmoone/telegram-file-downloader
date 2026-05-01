@@ -1,6 +1,5 @@
 // ============================================================
-// ربات دانلودر ملی - نسخه نهایی کامل با قابلیت‌های پیشرفته (V5)
-// قابلیت‌ها: دانلود مستقیم، پنل حرفه‌ای، رفرال، سهمیه تفکیک‌شده
+// ربات دانلودر ملی - نسخه نهایی کامل با قابلیت‌های پیشرفته
 // ============================================================
 
 // ---- قیمت‌های پیش‌فرض (قابل تنظیم از پنل مدیریت) ----
@@ -24,8 +23,6 @@ const TTL_NORMAL = 3600;
 const TTL_PRO = 86400;
 const DAILY_LIMIT_NORMAL = 2;
 const DAILY_LIMIT_PRO = 6;
-const DAILY_DIRECT_LIMIT_NORMAL = 1;
-const DAILY_DIRECT_LIMIT_PRO = 3;
 const DAILY_VOLUME_NORMAL_BYTES = NORMAL_DAILY_VOLUME_MB * 1024 * 1024;
 const DAILY_VOLUME_PRO_BYTES = PRO_DAILY_VOLUME_MB * 1024 * 1024;
 const OVERSIZED_PENDING_HOURS = 1;
@@ -36,22 +33,27 @@ const lastCallbackProcessed = new Map();
 const BOT_SIGNATURE = '\n\n🤖 <a href="https://t.me/filesmanagement_bot">@filesmanagement_bot</a>';
 
 // ============================================================
-// دکمه‌های رنگی و لینک‌دار
+// ساخت دکمه‌های رنگی بر اساس مستندات Bot API 9.6 (سال 2026)
 // ============================================================
 function colorBtn(text, data, color) {
   let style;
+  // پشتیبانی از نام رنگ‌ها و نام استایل‌های استاندارد تلگرام
   if (color === 'blue' || color === 'primary') style = 'primary';
   else if (color === 'green' || color === 'success') style = 'success';
   else if (color === 'red' || color === 'danger') style = 'danger';
   
+  // اگر دیتا با http شروع شود، یعنی لینک پرداخت یا آدرس وب است
   if (typeof data === 'string' && data.startsWith('http')) {
     return { text, url: data, style };
   }
+  
+  // در غیر این صورت به عنوان دکمه شیشه‌ای معمولی (callback) در نظر گرفته می‌شود
   return { text, callback_data: data, style };
 }
 
+
 // ============================================================
-// کیبوردها
+// کیبوردهای اصلی
 // ============================================================
 
 const MAIN_KEYBOARD = {
@@ -64,10 +66,9 @@ const MAIN_KEYBOARD = {
   ]
 };
 
-function buildAdminKeyboard(isDirectEnabled = true) {
+function buildAdminKeyboard() {
   return {
     inline_keyboard: [
-      [colorBtn(isDirectEnabled ? "🔴 ارسال مستقیم: غیرفعال" : "🟢 ارسال مستقیم: فعال", "admin_direct_toggle", "primary")],
       [colorBtn("🔧 ریست صف", "admin_reset_queue", "red"), colorBtn("🔧 ریست پردازش‌ها", "admin_fix_active", "red")],
       [colorBtn("⭐️ ارتقا به Pro", "admin_promote", "green"), colorBtn("🔄 ریست سهمیه", "admin_reset_quota", "blue")],
       [colorBtn("📢 افزودن کانال", "admin_set_channel", "blue"), colorBtn("📋 مشاهده کانال‌ها", "admin_show_channels", "blue")],
@@ -78,24 +79,13 @@ function buildAdminKeyboard(isDirectEnabled = true) {
       [colorBtn("👥 اعضای Pro", "admin_pro_members_page:1", "blue"), colorBtn("🔔 تخفیف تمدید", "admin_renewal_discount", "blue")],
       [colorBtn("🎟 مدیریت کدهای تخفیف", "admin_coupon_menu", "green"), colorBtn("🔗 تنظیمات رفرال", "admin_referral_settings", "blue")],
       [colorBtn("📈 آمار رفرال‌ها", "admin_referral_stats", "blue"), colorBtn("🔴 حالت بروزرسانی", "admin_maintenance_toggle", "danger")],
-      [colorBtn("🖥 مانیتورینگ", "admin_monitoring", "blue"), colorBtn("🔙 منوی اصلی", "back_to_main", "danger")]
+      [colorBtn("⚡️ فعال/غیرفعال ارسال مستقیم", "admin_toggle_direct", "primary"), colorBtn("🖥 مانیتورینگ", "admin_monitoring", "blue")],
+      [colorBtn("🔙 منوی اصلی", "back_to_main", "danger")]
     ]
   };
 }
 
-function getMainKeyboardForAdmin(adminChatId, chatId) {
-  const kb = {
-    inline_keyboard: [
-      [colorBtn("📥 دریافت لینک ملی", "new_link_check", "primary")],
-      [colorBtn("📊 آمار لحظه‌ای", "stats", "blue"), colorBtn("👤 وضعیت من", "status", "blue")],
-      [colorBtn("⭐️ عضویت Pro", "pro_info", "green"), colorBtn("🗑 حذف فایل من", "delete_my_file", "red")],
-      [colorBtn("🎁 اشتراک رایگان Pro", "referral_menu", "blue"), colorBtn("🏷 کد تخفیف", "use_discount_code", "blue")],
-      [colorBtn("❓ راهنما", "help", "blue"), { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }]
-    ]
-  };
-  if (adminChatId && chatId === adminChatId) kb.inline_keyboard.push([colorBtn("🛠 پنل مدیریت", "admin_panel", "primary")]);
-  return kb;
-}
+const ADMIN_KEYBOARD = buildAdminKeyboard();
 
 // ============================================================
 // توابع کمکی ارتباط با تلگرام
@@ -178,10 +168,14 @@ async function dbDeleteAdminState(env, chatId) {
   } catch (e) { }
 }
 
+// ============================================================
+// وضعیت Broadcast در D1
+// ============================================================
+
 async function dbSaveBroadcastState(env, adminChatId, state) {
   try {
     await env.DB.prepare('INSERT OR REPLACE INTO broadcast_state (admin_chat_id, total, sent, fail, status, message_id, start_time, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(adminChatId, state.total || 0, state.sent || 0, state.fail || 0, state.status || 'running', state.messageId || null, state.startTime || Date.now(), Date.now()).run();
-  } catch (e) { }
+  } catch (e) { console.error('dbSaveBroadcastState:', e); }
 }
 
 async function dbGetBroadcastState(env, adminChatId) {
@@ -193,7 +187,8 @@ async function dbGetBroadcastState(env, adminChatId) {
 }
 
 async function dbSetBroadcastCancelled(env, adminChatId) {
-  try { await env.DB.prepare('UPDATE broadcast_state SET status = ? WHERE admin_chat_id = ?').bind('cancelled', adminChatId).run(); } catch (e) { }
+  try { await env.DB.prepare('UPDATE broadcast_state SET status = ? WHERE admin_chat_id = ?').bind('cancelled', adminChatId).run();
+  } catch (e) { }
 }
 
 async function dbIsBroadcastCancelled(env, adminChatId) {
@@ -305,56 +300,116 @@ async function getBotSettings(env) {
   try {
     const row = await env.DB.prepare('SELECT setting_key, setting_value FROM bot_settings').all();
     const settings = {};
-    for (const r of (row.results || [])) settings[r.setting_key] = r.setting_value;
+    for (const r of (row.results || [])) {
+      settings[r.setting_key] = r.setting_value;
+    }
     return settings;
   } catch { return {}; }
 }
 
 async function setBotSetting(env, key, value) {
-  try { await env.DB.prepare('INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)').bind(key, String(value)).run(); } catch (e) { }
+  try {
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)').bind(key, String(value)).run();
+  } catch (e) { console.error('setBotSetting error:', e); }
 }
 
 async function getDirectUploadEnabled(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'direct_upload_enabled'").first(); return row ? row.setting_value === '1' : true; } catch { return true; }
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'direct_upload_enabled'").first();
+    return row ? row.setting_value === '1' : true;
+  } catch { return true; }
 }
-async function getEffectiveStarsPrice(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'stars_price'").first(); return row ? parseInt(row.setting_value) : STARS_AMOUNT; } catch { return STARS_AMOUNT; }
-}
-async function getEffectiveUsdPrice(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'usd_price'").first(); return row ? parseFloat(row.setting_value) : USD_AMOUNT; } catch { return USD_AMOUNT; }
-}
-async function getMaintenanceMode(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'maintenance_mode'").first(); return row?.setting_value === '1'; } catch { return false; }
-}
-async function getMaintenanceExceptions(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'maintenance_exceptions'").first(); if (!row || !row.setting_value) return []; return JSON.parse(row.setting_value); } catch { return []; }
-}
-async function getNormalFileSizeLimitMB(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_file_size_limit_mb'").first(); return row ? parseInt(row.setting_value) : 200; } catch { return 200; }
-}
-async function getProFileSizeLimitMB(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'pro_file_size_limit_mb'").first(); return row ? parseInt(row.setting_value) : 2048; } catch { return 2048; }
-}
-async function getNormalMaxTimeSec(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_max_time_sec'").first(); return row ? parseInt(row.setting_value) : TTL_NORMAL; } catch { return TTL_NORMAL; }
-}
-async function getProMaxTimeSec(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'pro_max_time_sec'").first(); return row ? parseInt(row.setting_value) : TTL_PRO; } catch { return TTL_PRO; }
-}
-async function getNormalDailyFiles(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_daily_files'").first(); return row ? parseInt(row.setting_value) : DAILY_LIMIT_NORMAL; } catch { return DAILY_LIMIT_NORMAL; }
-}
+
 async function getNormalDailyDirectFiles(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_daily_direct_files'").first(); return row ? parseInt(row.setting_value) : DAILY_DIRECT_LIMIT_NORMAL; } catch { return DAILY_DIRECT_LIMIT_NORMAL; }
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_daily_direct_files'").first();
+    return row ? parseInt(row.setting_value) : 1;
+  } catch { return 1; }
 }
+
+async function getEffectiveStarsPrice(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'stars_price'").first();
+    return row ? parseInt(row.setting_value) : STARS_AMOUNT;
+  } catch { return STARS_AMOUNT; }
+}
+
+async function getEffectiveUsdPrice(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'usd_price'").first();
+    return row ? parseFloat(row.setting_value) : USD_AMOUNT;
+  } catch { return USD_AMOUNT; }
+}
+
+async function getMaintenanceMode(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'maintenance_mode'").first();
+    return row?.setting_value === '1';
+  } catch { return false; }
+}
+
+async function getMaintenanceExceptions(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'maintenance_exceptions'").first();
+    if (!row || !row.setting_value) return [];
+    return JSON.parse(row.setting_value);
+  } catch { return []; }
+}
+
+async function getNormalFileSizeLimitMB(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_file_size_limit_mb'").first();
+    return row ? parseInt(row.setting_value) : 200;
+  } catch { return 200; }
+}
+
+async function getProFileSizeLimitMB(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'pro_file_size_limit_mb'").first();
+    return row ? parseInt(row.setting_value) : 2048;
+  } catch { return 2048; }
+}
+
+async function getNormalMaxTimeSec(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_max_time_sec'").first();
+    return row ? parseInt(row.setting_value) : TTL_NORMAL;
+  } catch { return TTL_NORMAL; }
+}
+
+async function getProMaxTimeSec(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'pro_max_time_sec'").first();
+    return row ? parseInt(row.setting_value) : TTL_PRO;
+  } catch { return TTL_PRO; }
+}
+
+async function getNormalDailyFiles(env) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_daily_files'").first();
+    return row ? parseInt(row.setting_value) : DAILY_LIMIT_NORMAL;
+  } catch { return DAILY_LIMIT_NORMAL; }
+}
+
 async function getNormalDailyVolumeMB(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_daily_volume_mb'").first(); return row ? parseInt(row.setting_value) : NORMAL_DAILY_VOLUME_MB; } catch { return NORMAL_DAILY_VOLUME_MB; }
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'normal_daily_volume_mb'").first();
+    return row ? parseInt(row.setting_value) : NORMAL_DAILY_VOLUME_MB;
+  } catch { return NORMAL_DAILY_VOLUME_MB; }
 }
+
 async function getRenewalDiscountPercent(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'renewal_discount_percent'").first(); return row ? parseFloat(row.setting_value) : 0; } catch { return 0; }
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'renewal_discount_percent'").first();
+    return row ? parseFloat(row.setting_value) : 0;
+  } catch { return 0; }
 }
+
 async function getRenewalNotifyHours(env) {
-  try { const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'renewal_notify_hours'").first(); return row ? parseInt(row.setting_value) : 48; } catch { return 48; }
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'renewal_notify_hours'").first();
+    return row ? parseInt(row.setting_value) : 48;
+  } catch { return 48; }
 }
 
 // ============================================================
@@ -371,7 +426,8 @@ async function getReferralSettings(env) {
       referral_buy_bonus_enabled: s['referral_buy_bonus_enabled'] === '1',
       referral_buy_bonus_plan_id: s['referral_buy_bonus_plan_id'] || null,
       tiers: s['referral_tiers'] ? JSON.parse(s['referral_tiers']) : [
-        { count: 5, plan_id: null, plan_days: 1, label: 'پلن ۱ روزه رایگان', reward_type: 'auto_pro' }
+        { count: 5, plan_id: null, plan_days: 1, label: 'پلن ۱ روزه رایگان', reward_type: 'auto_pro' },
+        { count: 10, plan_id: null, plan_days: 3, label: 'پلن ۳ روزه رایگان', reward_type: 'auto_pro' }
       ]
     };
   } catch { return { enabled: true, referral_buy_bonus_enabled: false, referral_buy_bonus_plan_id: null, tiers: [] }; }
@@ -383,7 +439,10 @@ async function getReferralLink(env, chatId) {
 }
 
 async function getReferralCount(env, chatId) {
-  try { const row = await env.DB.prepare('SELECT COUNT(*) as cnt FROM referrals WHERE referrer_chat_id = ? AND valid = 1').bind(chatId).first(); return row?.cnt || 0; } catch { return 0; }
+  try {
+    const row = await env.DB.prepare('SELECT COUNT(*) as cnt FROM referrals WHERE referrer_chat_id = ? AND valid = 1').bind(chatId).first();
+    return row?.cnt || 0;
+  } catch { return 0; }
 }
 
 async function addReferral(env, referrerChatId, newUserChatId, TOKEN) {
@@ -404,35 +463,52 @@ async function addReferral(env, referrerChatId, newUserChatId, TOKEN) {
           await env.DB.prepare('INSERT OR IGNORE INTO referral_rewards (chat_id, tier_count, created_at, claimed) VALUES (?, ?, ?, 0)').bind(referrerChatId, tier.count, Date.now()).run();
           const isCoupon = tier.reward_type === 'discount_code';
           const btnText = isCoupon ? "🎁 دریافت کد تخفیف ۱۰۰٪" : "🎁 دریافت اشتراک رایگان Pro";
-          await sendMessage(referrerChatId, `🎉 <b>تبریک! به حد نصاب رفرال رسیدید!</b>\n\n✅ ${count} نفر با لینک شما عضو شدند.\n🎁 می‌توانید پاداش خود را دریافت کنید!\n\nروی دکمه زیر بزنید:`, { inline_keyboard: [[colorBtn(btnText, "claim_referral_reward", "success")]] }, TOKEN);
+          await sendMessage(referrerChatId,
+            `🎉 <b>تبریک! به حد نصاب رفرال رسیدید!</b>\n\n✅ ${count} نفر با لینک شما عضو شدند.\n🎁 می‌توانید پاداش خود را دریافت کنید!\n\nروی دکمه زیر بزنید:`,
+            { inline_keyboard: [[colorBtn(btnText, "claim_referral_reward", "success")]] }, TOKEN);
         }
         break;
       }
     }
-  } catch (e) { }
+  } catch (e) { console.error('addReferral error:', e); }
 }
 
 async function claimReferralReward(env, chatId, TOKEN) {
   try {
     const settings = await getReferralSettings(env);
-    if (!settings.enabled) { await sendMessage(chatId, '❌ سیستم رفرال غیرفعال است.', MAIN_KEYBOARD, TOKEN); return; }
+    if (!settings.enabled) {
+      await sendMessage(chatId, '❌ سیستم رفرال غیرفعال است.', MAIN_KEYBOARD, TOKEN);
+      return;
+    }
     const count = await getReferralCount(env, chatId);
     let bestTier = null;
     for (const tier of [...settings.tiers].sort((a, b) => b.count - a.count)) {
       if (count >= tier.count) {
         const alreadyClaimed = await env.DB.prepare('SELECT id FROM referral_rewards WHERE chat_id = ? AND tier_count = ? AND claimed = 1').bind(chatId, tier.count).first();
-        if (!alreadyClaimed) { bestTier = tier; break; }
+        if (!alreadyClaimed) {
+          bestTier = tier;
+          break;
+        }
       }
     }
-    if (!bestTier) { await sendMessage(chatId, `❌ هیچ جایزه‌ای برای دریافت وجود ندارد.\n\nشما تاکنون ${count} رفرال معتبر داشتید.`, MAIN_KEYBOARD, TOKEN); return; }
+    if (!bestTier) {
+      await sendMessage(chatId, `❌ هیچ جایزه‌ای برای دریافت وجود ندارد.\n\nشما تاکنون ${count} رفرال معتبر داشتید.`, MAIN_KEYBOARD, TOKEN);
+      return;
+    }
     
     const now = Math.floor(Date.now() / 1000);
     
     if (bestTier.reward_type === 'discount_code') {
+       // تولید کد تخفیف 100 درصدی و تحویل به کاربر
        const code = 'REF-' + Math.random().toString(36).substring(2, 8).toUpperCase();
-       await env.DB.prepare('INSERT INTO coupons (code, discount_percent, plan_id, max_uses, used_count, expires_at, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(code, 100, bestTier.plan_id || null, 1, 0, null, 1, Date.now()).run();
+       await env.DB.prepare('INSERT INTO coupons (code, discount_percent, plan_id, max_uses, used_count, expires_at, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(
+         code, 100, bestTier.plan_id || null, 1, 0, null, 1, Date.now()
+       ).run();
        await env.DB.prepare('UPDATE referral_rewards SET claimed = 1 WHERE chat_id = ? AND tier_count = ?').bind(chatId, bestTier.count).run();
-       await sendMessage(chatId, `✅ <b>کد تخفیف اختصاصی شما تولید شد!</b>\n\n🎁 جایزه رفرال: ${bestTier.label}\n\n🎟 کد تخفیف شما (قابل استفاده برای ۱ نفر با ۱۰۰٪ تخفیف):\n<code>${code}</code>\n\nشما می‌توانید این کد را به هر کسی که دوست دارید هدیه بدهید!`, MAIN_KEYBOARD, TOKEN);
+       
+       await sendMessage(chatId,
+         `✅ <b>کد تخفیف اختصاصی شما تولید شد!</b>\n\n🎁 جایزه رفرال: ${bestTier.label}\n\n🎟 کد تخفیف شما (قابل استفاده برای ۱ نفر با ۱۰۰٪ تخفیف):\n<code>${code}</code>\n\nشما می‌توانید این کد را به هر کسی که دوست دارید هدیه بدهید!`,
+         MAIN_KEYBOARD, TOKEN);
        return;
     }
 
@@ -451,7 +527,7 @@ async function claimReferralReward(env, chatId, TOKEN) {
         planSnapshot = JSON.stringify({ plan_id: plan.id, name: plan.name, daily_files: plan.daily_files, daily_direct_files: plan.daily_direct_files, daily_volume_gb: plan.daily_volume_gb, max_file_size_mb: plan.max_file_size_mb || 2048, duration_days: plan.duration_days, activated_at: now, expires_at: expiresAt });
       }
     } else {
-      planSnapshot = JSON.stringify({ name: planName, daily_files: DAILY_LIMIT_PRO, daily_direct_files: DAILY_DIRECT_LIMIT_PRO, daily_volume_gb: PRO_DAILY_VOLUME_MB / 1024, max_file_size_mb: 2048, duration_days: durationDays, activated_at: now, expires_at: expiresAt });
+      planSnapshot = JSON.stringify({ name: planName, daily_files: DAILY_LIMIT_PRO, daily_direct_files: 3, daily_volume_gb: PRO_DAILY_VOLUME_MB / 1024, max_file_size_mb: 2048, duration_days: durationDays, activated_at: now, expires_at: expiresAt });
     }
 
     const existingPro = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, now).first();
@@ -460,28 +536,38 @@ async function claimReferralReward(env, chatId, TOKEN) {
     await env.DB.prepare('INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at, plan_snapshot) VALUES (?, ?, ?, ?, ?)').bind(chatId, newExpiry, `referral_${Date.now()}`, now, planSnapshot).run();
     await env.DB.prepare('UPDATE referral_rewards SET claimed = 1 WHERE chat_id = ? AND tier_count = ?').bind(chatId, bestTier.count).run();
     
-    await sendMessage(chatId, `✅ <b>اشتراک رایگان Pro فعال شد!</b>\n\n🎁 جایزه رفرال: ${planName}\n📅 انقضا: ${new Date(newExpiry * 1000).toLocaleDateString('fa-IR')}\n\nممنون که دوستانت رو دعوت کردی!`, MAIN_KEYBOARD, TOKEN);
+    await sendMessage(chatId,
+      `✅ <b>اشتراک رایگان Pro فعال شد!</b>\n\n🎁 جایزه رفرال: ${planName}\n📅 انقضا: ${new Date(newExpiry * 1000).toLocaleDateString('fa-IR')}\n\nممنون که دوستانت رو دعوت کردی!`,
+      MAIN_KEYBOARD, TOKEN);
       
+    // اطلاع به مدیر
+    const activeProCount = (await env.DB.prepare('SELECT COUNT(*) as c FROM pro_users WHERE expires_at > ?').bind(Math.floor(Date.now() / 1000)).first())?.c || 0;
     if (env.ADMIN_CHAT_ID) {
-        const activeProCount = (await env.DB.prepare('SELECT COUNT(*) as c FROM pro_users WHERE expires_at > ?').bind(Math.floor(Date.now() / 1000)).first())?.c || 0;
         await sendSimple(env.ADMIN_CHAT_ID, `🟢 <b>فعال‌سازی Pro (رفرال)</b>\n\n👤 کاربر: <code>${chatId}</code>\n🎁 جایزه: ${planName}\n\n👥 اعضای فعال Pro: ${activeProCount}`, TOKEN);
     }
-  } catch (e) { await sendMessage(chatId, '❌ خطا در فعال‌سازی جایزه.', MAIN_KEYBOARD, TOKEN); }
+  } catch (e) {
+    console.error('claimReferralReward error:', e);
+    await sendMessage(chatId, '❌ خطا در فعال‌سازی جایزه.', MAIN_KEYBOARD, TOKEN);
+  }
 }
 
 async function handleReferralBuyBonus(env, newProChatId, TOKEN) {
   try {
     const settings = await getReferralSettings(env);
     if (!settings.referral_buy_bonus_enabled || !settings.referral_buy_bonus_plan_id) return;
+
     const referrerRow = await env.DB.prepare('SELECT referrer_chat_id FROM referrals WHERE new_user_chat_id = ? AND valid = 1').bind(newProChatId).first();
     if (!referrerRow) return;
     const referrerChatId = referrerRow.referrer_chat_id;
+
     const bonusCheck = await env.DB.prepare('SELECT id FROM referral_buy_bonuses WHERE referrer_chat_id = ? AND buyer_chat_id = ?').bind(referrerChatId, newProChatId).first();
     if (bonusCheck) return;
+
     const planId = parseInt(settings.referral_buy_bonus_plan_id);
     const plan = await getProPlanById(env, planId);
     if (!plan) return;
     const now = Math.floor(Date.now() / 1000);
+
     const existingPro = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(referrerChatId, now).first();
     const addSeconds = plan.duration_days * 24 * 60 * 60;
     let newExpiry;
@@ -491,15 +577,19 @@ async function handleReferralBuyBonus(env, newProChatId, TOKEN) {
       const planSnapshot = JSON.stringify({ plan_id: plan.id, name: plan.name, daily_files: plan.daily_files, daily_direct_files: plan.daily_direct_files, daily_volume_gb: plan.daily_volume_gb, max_file_size_mb: plan.max_file_size_mb || 2048, duration_days: plan.duration_days, activated_at: now, expires_at: newExpiry });
       await env.DB.prepare('INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at, plan_snapshot) VALUES (?, ?, ?, ?, ?)').bind(referrerChatId, newExpiry, `ref_buy_bonus_${Date.now()}`, now, planSnapshot).run();
       await env.DB.prepare('INSERT OR IGNORE INTO referral_buy_bonuses (referrer_chat_id, buyer_chat_id, created_at) VALUES (?, ?, ?)').bind(referrerChatId, newProChatId, Date.now()).run();
-      await sendMessage(referrerChatId, `🎁 <b>جایزه معرفی!</b>\n\nیکی از کاربرانی که با لینک شما عضو شده، اشتراک Pro خریده!\n\n✅ <b>${plan.duration_days} روز</b> به مدت اشتراک شما اضافه شد (رزرو).\n📅 انقضای جدید: ${new Date(newExpiry * 1000).toLocaleDateString('fa-IR')}`, MAIN_KEYBOARD, TOKEN);
+      await sendMessage(referrerChatId,
+        `🎁 <b>جایزه معرفی!</b>\n\nیکی از کاربرانی که با لینک شما عضو شده، اشتراک Pro خریده!\n\n✅ <b>${plan.duration_days} روز</b> به مدت اشتراک شما اضافه شد (رزرو).\n📅 انقضای جدید: ${new Date(newExpiry * 1000).toLocaleDateString('fa-IR')}`,
+        MAIN_KEYBOARD, TOKEN);
     } else {
       newExpiry = now + addSeconds;
       const planSnapshot = JSON.stringify({ plan_id: plan.id, name: plan.name, daily_files: plan.daily_files, daily_direct_files: plan.daily_direct_files, daily_volume_gb: plan.daily_volume_gb, max_file_size_mb: plan.max_file_size_mb || 2048, duration_days: plan.duration_days, activated_at: now, expires_at: newExpiry });
       await env.DB.prepare('INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at, plan_snapshot) VALUES (?, ?, ?, ?, ?)').bind(referrerChatId, newExpiry, `ref_buy_bonus_${Date.now()}`, now, planSnapshot).run();
       await env.DB.prepare('INSERT OR IGNORE INTO referral_buy_bonuses (referrer_chat_id, buyer_chat_id, created_at) VALUES (?, ?, ?)').bind(referrerChatId, newProChatId, Date.now()).run();
-      await sendMessage(referrerChatId, `🎁 <b>جایزه معرفی!</b>\n\nیکی از کاربرانی که با لینک شما عضو شده، اشتراک Pro خریده!\n\n✅ به عنوان هدیه، اشتراک Pro <b>${plan.name}</b> برای شما فعال شد.\n📅 انقضا: ${new Date(newExpiry * 1000).toLocaleDateString('fa-IR')}`, MAIN_KEYBOARD, TOKEN);
+      await sendMessage(referrerChatId,
+        `🎁 <b>جایزه معرفی!</b>\n\nیکی از کاربرانی که با لینک شما عضو شده، اشتراک Pro خریده!\n\n✅ به عنوان هدیه، اشتراک Pro <b>${plan.name}</b> برای شما فعال شد.\n📅 انقضا: ${new Date(newExpiry * 1000).toLocaleDateString('fa-IR')}`,
+        MAIN_KEYBOARD, TOKEN);
     }
-  } catch (e) { }
+  } catch (e) { console.error('handleReferralBuyBonus error:', e); }
 }
 
 // ============================================================
@@ -525,15 +615,15 @@ async function useCoupon(env, code, chatId) {
 }
 
 // ============================================================
-// توابع محدودیت روزانه (مجهز به سهمیه مستقیم)
+// توابع محدودیت روزانه
 // ============================================================
 
 async function getDailyLimit(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
-  let row = await env.DB.prepare('SELECT file_count, reset_date, daily_volume_bytes, direct_file_count FROM daily_limits WHERE chat_id = ?').bind(chatId).first();
+  let row = await env.DB.prepare('SELECT file_count, direct_file_count, reset_date, daily_volume_bytes FROM daily_limits WHERE chat_id = ?').bind(chatId).first();
   if (!row || row.reset_date < todayStart) {
-    await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date, daily_volume_bytes, direct_file_count) VALUES (?, 0, ?, 0, 0)').bind(chatId, todayStart).run();
-    row = { file_count: 0, reset_date: todayStart, daily_volume_bytes: 0, direct_file_count: 0 };
+    await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, direct_file_count, reset_date, daily_volume_bytes) VALUES (?, 0, 0, ?, 0)').bind(chatId, todayStart).run();
+    row = { file_count: 0, direct_file_count: 0, reset_date: todayStart, daily_volume_bytes: 0 };
   }
   return { fileCount: row.file_count || 0, directFileCount: row.direct_file_count || 0, resetDate: row.reset_date, dailyVolumeBytes: row.daily_volume_bytes || 0 };
 }
@@ -541,97 +631,171 @@ async function getDailyLimit(env, chatId) {
 async function incrementDailyLimit(env, chatId, addedVolumeBytes, isDirect = false) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
   const directInc = isDirect ? 1 : 0;
-  await env.DB.prepare('INSERT INTO daily_limits (chat_id, file_count, reset_date, daily_volume_bytes, direct_file_count) VALUES (?, 1, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET file_count = file_count + 1, daily_volume_bytes = daily_volume_bytes + excluded.daily_volume_bytes, direct_file_count = direct_file_count + excluded.direct_file_count, reset_date = excluded.reset_date WHERE daily_limits.reset_date >= ?')
-  .bind(chatId, todayStart, addedVolumeBytes, directInc, todayStart).run();
+  await env.DB.prepare('INSERT INTO daily_limits (chat_id, file_count, direct_file_count, reset_date, daily_volume_bytes) VALUES (?, 1, ?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET file_count = file_count + 1, direct_file_count = direct_file_count + ?, daily_volume_bytes = daily_volume_bytes + excluded.daily_volume_bytes, reset_date = excluded.reset_date WHERE daily_limits.reset_date >= ?').bind(chatId, directInc, todayStart, addedVolumeBytes, directInc, todayStart).run();
 }
 
 async function canUploadByVolume(env, chatId, fileSizeBytes, isPro, planInfo) {
   const { dailyVolumeBytes } = await getDailyLimit(env, chatId);
   let limitBytes;
-  if (isPro && planInfo && planInfo.daily_volume_gb) limitBytes = planInfo.daily_volume_gb * 1024 * 1024 * 1024;
-  else if (!isPro) { const normalVolMB = await getNormalDailyVolumeMB(env); limitBytes = normalVolMB * 1024 * 1024; }
-  else limitBytes = DAILY_VOLUME_PRO_BYTES;
+  if (isPro && planInfo && planInfo.daily_volume_gb) {
+    limitBytes = planInfo.daily_volume_gb * 1024 * 1024 * 1024;
+  } else if (!isPro) {
+    const normalVolMB = await getNormalDailyVolumeMB(env);
+    limitBytes = normalVolMB * 1024 * 1024;
+  } else {
+    limitBytes = DAILY_VOLUME_PRO_BYTES;
+  }
   const remainingBytes = Math.max(0, limitBytes - dailyVolumeBytes);
   return { allowed: (dailyVolumeBytes + fileSizeBytes) <= limitBytes, remainingBytes };
 }
 
-async function canUpload(env, chatId, isPro, planInfo, isDirectRequest = false) {
+async function canUpload(env, chatId, isPro, planInfo, isDirect = false) {
   const { fileCount, directFileCount } = await getDailyLimit(env, chatId);
   let limit;
   let limitDirect;
   
-  if (isPro && planInfo) {
-    limit = planInfo.daily_files || DAILY_LIMIT_PRO;
-    limitDirect = planInfo.daily_direct_files ?? limit;
+  if (isPro && planInfo && planInfo.daily_files) {
+    limit = planInfo.daily_files;
+    limitDirect = planInfo.daily_direct_files !== undefined ? planInfo.daily_direct_files : 3;
   } else if (!isPro) {
     limit = await getNormalDailyFiles(env);
     limitDirect = await getNormalDailyDirectFiles(env);
   } else {
     limit = DAILY_LIMIT_PRO;
-    limitDirect = DAILY_DIRECT_LIMIT_PRO;
+    limitDirect = 3;
   }
   
   const remaining = Math.max(0, limit - fileCount);
   const remainingDirect = Math.max(0, limitDirect - directFileCount);
   
-  let allowed = remaining > 0;
-  if (isDirectRequest && allowed) {
-    allowed = remainingDirect > 0;
+  if (isDirect) {
+    return { allowed: remaining > 0 && remainingDirect > 0, current: fileCount, limit, remaining, currentDirect: directFileCount, limitDirect, remainingDirect };
   }
   
-  return { allowed, current: fileCount, limit, remaining, currentDirect: directFileCount, limitDirect, remainingDirect };
+  return { allowed: remaining > 0, current: fileCount, limit, remaining, currentDirect: directFileCount, limitDirect, remainingDirect };
 }
 
 async function resetUserQuota(env, chatId) {
   const todayStart = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
-  await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, reset_date, daily_volume_bytes, direct_file_count) VALUES (?, 0, ?, 0, 0)').bind(chatId, todayStart).run();
+  await env.DB.prepare('INSERT OR REPLACE INTO daily_limits (chat_id, file_count, direct_file_count, reset_date, daily_volume_bytes) VALUES (?, 0, 0, ?, 0)').bind(chatId, todayStart).run();
 }
 
 async function getRemainingQuotaText(env, chatId, isPro, planInfo) {
   const { remaining, limit, remainingDirect, limitDirect } = await canUpload(env, chatId, isPro, planInfo, false);
   const { remainingBytes } = await canUploadByVolume(env, chatId, 0, isPro, planInfo);
   let limitMB;
-  if (isPro && planInfo && planInfo.daily_volume_gb) limitMB = planInfo.daily_volume_gb * 1024;
-  else if (!isPro) limitMB = await getNormalDailyVolumeMB(env);
-  else limitMB = DAILY_VOLUME_PRO_BYTES / (1024 * 1024);
-  return `📊 سهمیه: ${remaining} از ${limit} فایل کل | ${remainingDirect} از ${limitDirect} فایل مستقیم\n💾 حجم باقی‌مانده: ${(remainingBytes / (1024 * 1024)).toFixed(1)} از ${limitMB} مگابایت`;
+  if (isPro && planInfo && planInfo.daily_volume_gb) {
+    limitMB = planInfo.daily_volume_gb * 1024;
+  } else if (!isPro) {
+    limitMB = await getNormalDailyVolumeMB(env);
+  } else {
+    limitMB = DAILY_VOLUME_PRO_BYTES / (1024 * 1024);
+  }
+  return `📊 سهمیه باقیمانده: ${remaining} از ${limit} فایل کل | ${remainingDirect} از ${limitDirect} مستقیم | ${(remainingBytes / (1024 * 1024)).toFixed(1)} از ${limitMB} مگابایت`;
 }
 
 // ============================================================
-// توابع عضویت اجباری و آمار کاربر
+// توابع عضویت اجباری
 // ============================================================
 
-async function getRequiredChannels(env) { try { const row = await env.DB.prepare('SELECT channels FROM required_channels WHERE id = 1').first(); if (!row) return []; return JSON.parse(row.channels); } catch { return []; } }
-async function setRequiredChannels(env, channelsArray) { await env.DB.prepare('INSERT OR REPLACE INTO required_channels (id, channels) VALUES (1, ?)').bind(JSON.stringify(channelsArray)).run(); }
+async function getRequiredChannels(env) {
+  try {
+    const row = await env.DB.prepare('SELECT channels FROM required_channels WHERE id = 1').first();
+    if (!row) return [];
+    return JSON.parse(row.channels);
+  } catch { return []; }
+}
+
+async function setRequiredChannels(env, channelsArray) {
+  await env.DB.prepare('INSERT OR REPLACE INTO required_channels (id, channels) VALUES (1, ?)').bind(JSON.stringify(channelsArray)).run();
+}
+
 async function isUserMemberOfChannels(chatId, channels, TOKEN) {
   if (!channels || channels.length === 0) return true;
   for (const ch of channels) {
     const clean = ch.replace('@', '').trim();
-    try { const res = await fetch(`https://api.telegram.org/bot${TOKEN}/getChatMember?chat_id=@${clean}&user_id=${chatId}`); const data = await res.json(); if (!data.ok || !data.result || !['member', 'creator', 'administrator'].includes(data.result.status)) return false; } catch { return false; }
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${TOKEN}/getChatMember?chat_id=@${clean}&user_id=${chatId}`);
+      const data = await res.json();
+      if (!data.ok || !data.result || !['member', 'creator', 'administrator'].includes(data.result.status)) return false;
+    } catch { return false; }
   }
   return true;
 }
-async function savePendingLink(env, chatId, fileUrl, fileSize) { await env.DB.prepare('INSERT OR REPLACE INTO pending_links (chat_id, file_url, file_size, timestamp) VALUES (?, ?, ?, ?)').bind(chatId, fileUrl, fileSize, Date.now()).run(); }
-async function getPendingLink(env, chatId) { const row = await env.DB.prepare('SELECT file_url, file_size FROM pending_links WHERE chat_id = ?').bind(chatId).first(); if (!row) return null; await env.DB.prepare('DELETE FROM pending_links WHERE chat_id = ?').bind(chatId).run(); return { url: row.file_url, fileSize: row.file_size }; }
 
-async function incrementUserStats(env, chatId, fileSizeBytes) { await env.DB.prepare('INSERT INTO user_stats (chat_id, total_files, total_volume_gb) VALUES (?, 1, ?) ON CONFLICT(chat_id) DO UPDATE SET total_files = total_files + 1, total_volume_gb = total_volume_gb + excluded.total_volume_gb').bind(chatId, fileSizeBytes / (1024 * 1024 * 1024)).run(); }
-async function getUserStats(env, chatId) { const row = await env.DB.prepare('SELECT total_files, total_volume_gb FROM user_stats WHERE chat_id = ?').bind(chatId).first(); return row ? { total_files: row.total_files, total_volume_gb: row.total_volume_gb } : { total_files: 0, total_volume_gb: 0 }; }
+async function savePendingLink(env, chatId, fileUrl, fileSize) {
+  await env.DB.prepare('INSERT OR REPLACE INTO pending_links (chat_id, file_url, file_size, timestamp) VALUES (?, ?, ?, ?)').bind(chatId, fileUrl, fileSize, Date.now()).run();
+}
+
+async function getPendingLink(env, chatId) {
+  const row = await env.DB.prepare('SELECT file_url, file_size FROM pending_links WHERE chat_id = ?').bind(chatId).first();
+  if (!row) return null;
+  await env.DB.prepare('DELETE FROM pending_links WHERE chat_id = ?').bind(chatId).run();
+  return { url: row.file_url, fileSize: row.file_size };
+}
+
+// ============================================================
+// آمار کاربر
+// ============================================================
+
+async function incrementUserStats(env, chatId, fileSizeBytes) {
+  await env.DB.prepare('INSERT INTO user_stats (chat_id, total_files, total_volume_gb) VALUES (?, 1, ?) ON CONFLICT(chat_id) DO UPDATE SET total_files = total_files + 1, total_volume_gb = total_volume_gb + excluded.total_volume_gb').bind(chatId, fileSizeBytes / (1024 * 1024 * 1024)).run();
+}
+
+async function getUserStats(env, chatId) {
+  const row = await env.DB.prepare('SELECT total_files, total_volume_gb FROM user_stats WHERE chat_id = ?').bind(chatId).first();
+  return row ? { total_files: row.total_files, total_volume_gb: row.total_volume_gb } : { total_files: 0, total_volume_gb: 0 };
+}
 
 // ============================================================
 // توابع پلن‌های Pro
 // ============================================================
 
-async function getProPlans(env) { try { const rows = await env.DB.prepare('SELECT * FROM pro_plans WHERE is_active = 1 ORDER BY sort_order ASC, id ASC').all(); return rows.results || []; } catch { return []; } }
-async function getAllProPlans(env) { try { const rows = await env.DB.prepare('SELECT * FROM pro_plans ORDER BY sort_order ASC, id ASC').all(); return rows.results || []; } catch { return []; } }
-async function getProPlanById(env, planId) { try { const row = await env.DB.prepare('SELECT * FROM pro_plans WHERE id = ?').bind(planId).first(); return row || null; } catch { return null; } }
-async function getUserActivePlan(env, chatId) { try { const row = await env.DB.prepare('SELECT plan_snapshot FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, Math.floor(Date.now() / 1000)).first(); if (!row || !row.plan_snapshot) return null; return JSON.parse(row.plan_snapshot); } catch { return null; } }
-async function getPlanDiscountForPlan(env, planId) { try { const now = Math.floor(Date.now() / 1000); const row = await env.DB.prepare('SELECT * FROM plan_discounts WHERE plan_id = ? AND active = 1 AND expires_at > ?').bind(planId, now).first(); return row || null; } catch { return null; } }
+async function getProPlans(env) {
+  try {
+    const rows = await env.DB.prepare('SELECT * FROM pro_plans WHERE is_active = 1 ORDER BY sort_order ASC, id ASC').all();
+    return rows.results || [];
+  } catch { return []; }
+}
+
+async function getAllProPlans(env) {
+  try {
+    const rows = await env.DB.prepare('SELECT * FROM pro_plans ORDER BY sort_order ASC, id ASC').all();
+    return rows.results || [];
+  } catch { return []; }
+}
+
+async function getProPlanById(env, planId) {
+  try {
+    const row = await env.DB.prepare('SELECT * FROM pro_plans WHERE id = ?').bind(planId).first();
+    return row || null;
+  } catch { return null; }
+}
+
+async function getUserActivePlan(env, chatId) {
+  try {
+    const row = await env.DB.prepare('SELECT plan_snapshot FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, Math.floor(Date.now() / 1000)).first();
+    if (!row || !row.plan_snapshot) return null;
+    return JSON.parse(row.plan_snapshot);
+  } catch { return null; }
+}
+
+async function getPlanDiscountForPlan(env, planId) {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const row = await env.DB.prepare('SELECT * FROM plan_discounts WHERE plan_id = ? AND active = 1 AND expires_at > ?').bind(planId, now).first();
+    return row || null;
+  } catch { return null; }
+}
 
 // ============================================================
-// توابع Pro و پرداخت
+// توابع Pro و پرداخت (با ارسال اعلان به مدیر)
 // ============================================================
 
-async function isProUser(env, chatId) { const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, Math.floor(Date.now() / 1000)).first(); return !!row; }
+async function isProUser(env, chatId) {
+  const row = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, Math.floor(Date.now() / 1000)).first();
+  return !!row;
+}
 
 async function activateProSubscription(env, chatId, paymentId, amountDesc, TOKEN, planId) {
   const now = Math.floor(Date.now() / 1000);
@@ -639,7 +803,6 @@ async function activateProSubscription(env, chatId, paymentId, amountDesc, TOKEN
   let planSnapshot = null;
   let planName = 'استاندارد ۳۰ روزه';
   let dailyFilesText = DAILY_LIMIT_PRO;
-  let dailyDirectText = DAILY_DIRECT_LIMIT_PRO;
   let dailyVolText = DAILY_VOLUME_PRO_BYTES / (1024 * 1024);
   let maxFileSizeMBText = await getProFileSizeLimitMB(env);
   let durationText = '۳۰ روز';
@@ -648,9 +811,12 @@ async function activateProSubscription(env, chatId, paymentId, amountDesc, TOKEN
     const plan = await getProPlanById(env, planId);
     if (plan) {
       expiresAt = now + plan.duration_days * 24 * 60 * 60;
-      planSnapshot = JSON.stringify({ plan_id: plan.id, name: plan.name, daily_files: plan.daily_files, daily_direct_files: plan.daily_direct_files, daily_volume_gb: plan.daily_volume_gb, max_file_size_mb: plan.max_file_size_mb || (await getProFileSizeLimitMB(env)), duration_days: plan.duration_days, activated_at: now, expires_at: expiresAt });
+      planSnapshot = JSON.stringify({
+        plan_id: plan.id, name: plan.name, daily_files: plan.daily_files, daily_direct_files: plan.daily_direct_files,
+        daily_volume_gb: plan.daily_volume_gb, max_file_size_mb: plan.max_file_size_mb || (await getProFileSizeLimitMB(env)),
+        duration_days: plan.duration_days, activated_at: now, expires_at: expiresAt
+      });
       dailyFilesText = plan.daily_files;
-      dailyDirectText = plan.daily_direct_files;
       dailyVolText = plan.daily_volume_gb * 1024;
       maxFileSizeMBText = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
       planName = plan.name;
@@ -660,119 +826,388 @@ async function activateProSubscription(env, chatId, paymentId, amountDesc, TOKEN
 
   await env.DB.prepare('INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at, plan_snapshot) VALUES (?, ?, ?, ?, ?)').bind(chatId, expiresAt, paymentId, now, planSnapshot).run();
   
-  await sendMessage(chatId, `✅ <b>عضویت Pro فعال شد!</b>\n\n💎 پلن: ${planName}\n💳 پرداخت: ${amountDesc}\n📅 انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 <b>مزایا:</b>\n• دانلود با اینترنت ملی\n• نگهداری فایل تا ${durationText}\n• اولویت در صف\n• ${dailyFilesText} فایل کل و ${dailyDirectText} فایل مستقیم در روز\n• حداکثر حجم هر فایل: ${maxFileSizeMBText} مگابایت`, MAIN_KEYBOARD, TOKEN);
+  await sendMessage(chatId,
+    `✅ <b>عضویت Pro فعال شد!</b>\n\n💎 پلن: ${planName}\n💳 پرداخت: ${amountDesc}\n📅 انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 <b>مزایا:</b>\n• دانلود با اینترنت ملی و صرفه‌جویی در حجم VPN\n• نگهداری فایل تا ${durationText}\n• اولویت در صف\n• ${dailyFilesText} فایل و ${dailyVolText} مگابایت در روز\n• حداکثر حجم هر فایل: ${maxFileSizeMBText} مگابایت`,
+    MAIN_KEYBOARD, TOKEN);
     
+  // نوتیفیکیشن به ادمین
+  const activeProCount = (await env.DB.prepare('SELECT COUNT(*) as c FROM pro_users WHERE expires_at > ?').bind(Math.floor(Date.now() / 1000)).first())?.c || 0;
   if (env.ADMIN_CHAT_ID) {
-      const activeProCount = (await env.DB.prepare('SELECT COUNT(*) as c FROM pro_users WHERE expires_at > ?').bind(Math.floor(Date.now() / 1000)).first())?.c || 0;
       const uInfo = await env.DB.prepare('SELECT name FROM users WHERE chat_id = ?').bind(chatId).first();
-      await sendSimple(env.ADMIN_CHAT_ID, `🟢 <b>خرید/ارتقا Pro جدید</b>\n\n👤 کاربر: <code>${chatId}</code> (${uInfo ? uInfo.name : 'کاربر'})\n📦 پلن: ${planName}\n💳 مبلغ: ${amountDesc}\n👥 اعضای Pro: ${activeProCount}`, TOKEN);
+      const uName = uInfo ? uInfo.name : 'کاربر';
+      const adminMsg = `🟢 <b>خرید/ارتقا Pro جدید</b>\n\n👤 کاربر: <code>${chatId}</code> (${uName})\n📦 پلن: ${planName}\n💳 مبلغ/روش: ${amountDesc}\n\n👥 اعضای فعال Pro: ${activeProCount}`;
+      await sendSimple(env.ADMIN_CHAT_ID, adminMsg, TOKEN);
   }
+
   await handleReferralBuyBonus(env, chatId, TOKEN);
   await handleOversizedAfterProActivation(env, chatId, TOKEN);
 }
+
+// ============================================================
+// مدیریت فایل oversized بعد از فعال شدن Pro
+// ============================================================
 
 async function handleOversizedAfterProActivation(env, chatId, TOKEN) {
   try {
     const overPend = await env.DB.prepare('SELECT file_url, file_size, password, branch_name, created_at FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
     if (!overPend) return;
+
     const now = Math.floor(Date.now() / 1000);
     const createdAt = Math.floor((overPend.created_at || 0) / 1000);
-    if ((now - createdAt) / 3600 > OVERSIZED_PENDING_HOURS) {
-      if (overPend.branch_name) { await deleteBranchFromGitHub(env, overPend.branch_name); await dbRemoveActiveBranch(env, overPend.branch_name); }
+    const hoursPassed = (now - createdAt) / 3600;
+
+    if (hoursPassed > OVERSIZED_PENDING_HOURS) {
+      if (overPend.branch_name) {
+        await deleteBranchFromGitHub(env, overPend.branch_name);
+        await dbRemoveActiveBranch(env, overPend.branch_name);
+      }
       await env.DB.prepare('DELETE FROM oversized_pending WHERE chat_id = ?').bind(chatId).run();
-      await sendMessage(chatId, `⚠️ مهلت فایل شما تمام شد و حذف گردید.\nدوباره لینک را ارسال کنید.`, MAIN_KEYBOARD, TOKEN);
+      await sendMessage(chatId, `⚠️ متأسفانه مهلت یک ساعته برای فایل شما به پایان رسید و فایل از سرور حذف شد.\n\nلطفاً دوباره لینک را ارسال کنید.`, MAIN_KEYBOARD, TOKEN);
       return;
     }
+
     if (overPend.branch_name) {
       const planInfo = await getUserActivePlan(env, chatId);
       const proTTL = await getProMaxTimeSec(env);
-      await dbSetBranchForUser(env, chatId, overPend.branch_name, now + proTTL);
+      const expiresAt = Math.floor(Date.now() / 1000) + proTTL;
+      await dbSetBranchForUser(env, chatId, overPend.branch_name, expiresAt);
       await dbIncrementLinks(env, (overPend.file_size || 0) / (1024 * 1024 * 1024));
       
+      // مشخص کردن اینکه آیا لینک مستقیم بوده یا نه بر اساس url 
       const isDirect = overPend.file_url && overPend.file_url.startsWith('tg_file_id:');
       await incrementDailyLimit(env, chatId, overPend.file_size || 0, isDirect);
+      
       await incrementUserStats(env, chatId, overPend.file_size || 0);
       const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${overPend.branch_name}.zip`;
       const quotaText = await getRemainingQuotaText(env, chatId, true, planInfo);
-      await sendMessage(chatId, `✅ <b>فایل شما آماده است!</b>\n\n🔗 لینک:\n${link}\n\n🔑 رمز: <code>${overPend.password || ''}</code>\n\n📌 <b>استخراج:</b> با 7-Zip فایل <code>archive.7z.001</code> را استخراج کنید.\n\n${quotaText}`, { inline_keyboard: [[colorBtn("🗑 حذف فایل", "delete_my_file", "danger")], [colorBtn("📥 دریافت جدید", "new_link_check", "primary")]] }, TOKEN);
+      const ttlText = planInfo?.duration_days ? planInfo.duration_days + ' روز' : '۱ روز';
+      await sendMessage(chatId,
+        `✅ <b>فایل شما آماده است!</b>\n\n🔗 لینک دانلود (${ttlText} معتبر):\n${link}\n\n🔑 رمز: <code>${overPend.password || ''}</code>${overPend.file_size ? `\n📦 حجم: ${((overPend.file_size) / (1024 * 1024)).toFixed(2)} MB` : ''}\n\n📌 <b>استخراج:</b> با 7-Zip فایل <code>archive.7z.001</code> را استخراج کنید.\n\n${quotaText}`,
+        { inline_keyboard: [[colorBtn("🗑 حذف فایل از سرور", "delete_my_file", "danger")], [colorBtn("📥 لینک جدید", "new_link_check", "primary")]] }, TOKEN);
       await env.DB.prepare('DELETE FROM oversized_pending WHERE chat_id = ?').bind(chatId).run();
     } else {
-      await sendMessage(chatId, `✅ <b>Pro فعال شد!</b>\nفایل شما در حال پردازش است.`, MAIN_KEYBOARD, TOKEN);
+      await sendMessage(chatId, `✅ <b>Pro فعال شد!</b>\n\n📦 فایل شما در حال پردازش است. به محض آماده شدن، لینک دانلود ارسال می‌شود.`, MAIN_KEYBOARD, TOKEN);
     }
-  } catch (e) { }
+  } catch (e) { console.error('handleOversizedAfterProActivation error:', e); }
 }
 
-async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN) {
-  const isPro = await isProUser(env, chatId);
-  if (isPro) {
-    const row = await env.DB.prepare('SELECT expires_at, plan_snapshot FROM pro_users WHERE chat_id = ?').bind(chatId).first();
-    let planName = 'استاندارد';
-    if (row?.plan_snapshot) { try { planName = JSON.parse(row.plan_snapshot).name || 'استاندارد'; } catch {} }
-    const planInfo = await getUserActivePlan(env, chatId);
-    const proTTL = await getProMaxTimeSec(env);
-    const msgText = `⭐️ <b>اشتراک Pro فعال است</b>\n\n📦 پلن: ${planName}\n📅 انقضا: ${new Date(row.expires_at * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• دانلود با اینترنت ملی\n• نگهداری تا ${Math.round(proTTL / 86400)} روز\n• ${planInfo?.daily_files || DAILY_LIMIT_PRO} فایل کل و ${planInfo?.daily_direct_files || DAILY_DIRECT_LIMIT_PRO} فایل مستقیم در روز\n• حداکثر حجم فایل: ${planInfo?.max_file_size_mb || (await getProFileSizeLimitMB(env))} مگابایت`;
-    if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msgText, MAIN_KEYBOARD, TOKEN);
-    else await sendMessage(chatId, msgText, MAIN_KEYBOARD, TOKEN);
-    return;
+// ============================================================
+// توابع تخفیف سراسری
+// ============================================================
+
+async function getDiscountSettings(env) {
+  try {
+    const row = await env.DB.prepare('SELECT active, stars_price, usd_price, expires_at FROM discount_settings WHERE id = 1').first();
+    if (!row || row.active !== 1) return null;
+    if (row.expires_at && row.expires_at < Math.floor(Date.now() / 1000)) { 
+        await env.DB.prepare('UPDATE discount_settings SET active = 0 WHERE id = 1').run();
+        return null; 
+    }
+    return { starsPrice: row.stars_price, usdPrice: row.usd_price, expiresAt: row.expires_at };
+  } catch { return null; }
+}
+
+async function setDiscount(env, starsPrice, usdPrice, durationHours) {
+  await env.DB.prepare('INSERT OR REPLACE INTO discount_settings (id, active, stars_price, usd_price, expires_at) VALUES (1, 1, ?, ?, ?)').bind(starsPrice, usdPrice, Math.floor(Date.now() / 1000) + durationHours * 3600).run();
+}
+
+async function clearDiscount(env) {
+  await env.DB.prepare('UPDATE discount_settings SET active = 0 WHERE id = 1').run();
+}
+
+// ============================================================
+// توابع پرداخت
+// ============================================================
+
+async function createNowPaymentsInvoice(env, chatId, amountUSD, planId, isRenewal = false) {
+  try {
+    const prefix = isRenewal ? 'renewal' : 'pro';
+    const orderId = planId ? `${prefix}_${chatId}_${planId}_${Date.now()}` : `${prefix}_${chatId}_${Date.now()}`;
+    const response = await fetch('https://api.nowpayments.io/v1/invoice', {
+      method: 'POST',
+      headers: { 'x-api-key': env.NOWPAYMENTS_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ price_amount: amountUSD, price_currency: "usd", pay_currency: "ton", order_id: orderId, order_description: isRenewal ? "تمدید اشتراک Pro" : "اشتراک Pro", ipn_callback_url: "https://telegram-file-bot.gptmoone.workers.dev/api/nowpayments-webhook", success_url: "https://t.me/filesmanagement_bot", cancel_url: "https://t.me/filesmanagement_bot" })
+    });
+    const data = await response.json();
+    return data.invoice_url ? { success: true, invoiceUrl: data.invoice_url, orderId } : { success: false };
+  } catch { return { success: false }; }
+}
+
+async function createStarsInvoiceLink(env, chatId, starsAmount, planId, isRenewal = false) {
+  try {
+    const prefix = isRenewal ? 'renewal' : 'stars';
+    const payload = planId ? `${prefix}:${chatId}:${planId}:${Date.now()}` : `${prefix}:${chatId}:${Date.now()}`;
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/createInvoiceLink`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: isRenewal ? "Renewal Pro Subscription" : "Pro Subscription", description: isRenewal ? "تمدید اشتراک Pro" : "اشتراک Pro", payload, provider_token: "", currency: "XTR", prices: [{ label: "Pro", amount: starsAmount }] })
+    });
+    const data = await res.json();
+    return data.ok ? { success: true, invoiceLink: data.result, payload } : { success: false };
+  } catch { return { success: false }; }
+}
+
+// ============================================================
+// توابع گیت‌هاب
+// ============================================================
+
+async function getFileSize(url) {
+  try { 
+    if(url.startsWith('tg_file_id:')) return null; // جلوگیری از درخواست HEAD برای File ID
+    const h = await fetch(url, { method: 'HEAD' });
+    const s = h.headers.get('content-length'); 
+    return s ? parseInt(s) : null; 
+  } catch { return null; }
+}
+
+async function getBranchTotalSize(env, branchName) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/trees/${branchName}?recursive=1`, {
+      headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.tree || []).filter(i => i.type === 'blob').reduce((s, i) => s + (i.size || 0), 0);
+  } catch { return null; }
+}
+
+async function deleteBranchFromGitHub(env, branchName) {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branchName}`, {
+      method: 'DELETE', headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+    });
+    return res.ok || res.status === 404;
+  } catch { return false; }
+}
+
+async function deleteUserBranch(env, chatId) {
+  const lastBranch = await dbGetLastBranch(env, chatId);
+  if (lastBranch) { 
+      await deleteBranchFromGitHub(env, lastBranch);
+      await dbRemoveActiveBranch(env, lastBranch); 
+  }
+}
+
+// ============================================================
+// دستورات ادمین
+// ============================================================
+
+async function adminPromoteToProWithPlan(env, targetUserId, planId, TOKEN) {
+  const exists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetUserId).first();
+  if (!exists) return "❌ کاربر یافت نشد.";
+  const now = Math.floor(Date.now() / 1000);
+  
+  if (planId) {
+    const plan = await getProPlanById(env, planId);
+    if (!plan) return "❌ پلن یافت نشد.";
+    const expiresAt = now + plan.duration_days * 24 * 60 * 60;
+    const planSnapshot = JSON.stringify({
+      plan_id: plan.id, name: plan.name, daily_files: plan.daily_files, daily_direct_files: plan.daily_direct_files,
+      daily_volume_gb: plan.daily_volume_gb, max_file_size_mb: plan.max_file_size_mb || 2048,
+      duration_days: plan.duration_days, activated_at: now, expires_at: expiresAt
+    });
+    await env.DB.prepare('INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at, plan_snapshot) VALUES (?, ?, ?, ?, ?)').bind(targetUserId, expiresAt, `admin_${Date.now()}`, now, planSnapshot).run();
+    if (TOKEN) {
+      await sendMessage(targetUserId, `✅ <b>عضویت Pro فعال شد!</b>\n\n💎 پلن: ${plan.name}\n💳 پرداخت: هدیه از مدیریت\n📅 انقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}\n\n🎁 <b>مزایا:</b>\n• دانلود با اینترنت ملی و صرفه‌جویی در حجم VPN\n• نگهداری فایل تا ${plan.duration_days} روز\n• اولویت در صف\n• ${plan.daily_files} فایل و ${plan.daily_volume_gb * 1024} مگابایت در روز\n• حداکثر حجم هر فایل: ${plan.max_file_size_mb || 2048} مگابایت`, MAIN_KEYBOARD, TOKEN);
+    }
+    return `✅ کاربر ${targetUserId} با پلن "${plan.name}" به Pro ارتقا یافت.\nانقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}`;
+  } else {
+    const expiresAt = now + 30 * 24 * 60 * 60;
+    await env.DB.prepare('INSERT OR REPLACE INTO pro_users (chat_id, expires_at, payment_id, activated_at, plan_snapshot) VALUES (?, ?, ?, ?, ?)').bind(targetUserId, expiresAt, `admin_${Date.now()}`, now, null).run();
+    return `✅ کاربر ${targetUserId} به Pro پیش‌فرض ارتقا یافت.\nانقضا: ${new Date(expiresAt * 1000).toLocaleDateString('fa-IR')}`;
+  }
+}
+
+async function adminResetQuota(env, targetUserId) {
+  const exists = await env.DB.prepare('SELECT 1 FROM users WHERE chat_id = ?').bind(targetUserId).first();
+  if (!exists) return "❌ کاربر یافت نشد.";
+  await resetUserQuota(env, targetUserId);
+  return `✅ سهمیه کاربر ${targetUserId} بازنشانی شد.`;
+}
+
+async function adminShowChannels(env, chatId, TOKEN) {
+  const channels = await getRequiredChannels(env);
+  if (channels.length === 0) { 
+      await sendMessage(chatId, "ℹ️ هیچ کانال اجباری تنظیم نشده است.", ADMIN_KEYBOARD, TOKEN); 
+      return;
+  }
+  const keyboard = { inline_keyboard: [] };
+  for (const ch of channels) { 
+      keyboard.inline_keyboard.push([{ text: `🔗 @${ch}`, url: `https://t.me/${ch}` }, colorBtn(`❌ حذف @${ch}`, `admin_remove_channel:${ch}`, "danger")]);
+  }
+  keyboard.inline_keyboard.push([colorBtn("⚠️ حذف همه کانال‌ها", "admin_remove_all_channels", "danger")]);
+  keyboard.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "primary")]);
+  await sendMessage(chatId, "📢 <b>کانال‌های اجباری:</b>", keyboard, TOKEN);
+}
+
+// ============================================================
+// Broadcast - ارسال همگانی (حل مشکل تایم‌اوت با Chunking)
+// ============================================================
+
+async function startBroadcast(env, adminChatId, messageText, TOKEN) {
+  const users = await getAllUsers(env);
+  const total = users.length;
+  if (!total) { 
+      await sendMessage(adminChatId, "❌ هیچ کاربری یافت نشد.", ADMIN_KEYBOARD, TOKEN); 
+      return;
   }
 
-  const plans = await getProPlans(env);
-  const baseStars = await getEffectiveStarsPrice(env);
-  const baseUsd = await getEffectiveUsdPrice(env);
-  const globalDiscount = await getDiscountSettings(env);
+  await dbSaveBroadcastState(env, adminChatId, { total, sent: 0, fail: 0, status: 'running', messageId: null, startTime: Date.now() });
+  let statusMsgId = null;
+  try {
+    const r = await sendMessage(adminChatId, `📨 <b>ارسال پیام همگانی آغاز شد</b>\n\n👥 کل: ${total}\n📊 ۰ از ${total} (۰٪)\n✅ موفق: ۰ | ❌ ناموفق: ۰\n\n⏱️ شروع: ${new Date().toLocaleTimeString('fa-IR')}\n\nبرای لغو ارسال، دستور /cancel_broadcast را ارسال کنید.`, ADMIN_KEYBOARD, TOKEN);
+    const rd = await r.json();
+    statusMsgId = rd.result?.message_id;
+    await dbSaveBroadcastState(env, adminChatId, { total, sent: 0, fail: 0, status: 'running', messageId: statusMsgId, startTime: Date.now() });
+  } catch (e) { console.error(e); }
 
-  if (!plans || plans.length === 0) {
-    const sa = globalDiscount ? globalDiscount.starsPrice : baseStars;
-    const ua = globalDiscount ? globalDiscount.usdPrice : baseUsd;
-    const si = await createStarsInvoiceLink(env, chatId, sa, null);
-    const ci = await createNowPaymentsInvoice(env, chatId, ua, null);
-    const rows = [];
-    if (si.success) rows.push([colorBtn(`⭐️ خرید با Stars — ${sa} Stars`, si.invoiceLink, "primary")]);
-    if (ci.success) rows.push([colorBtn(`💰 ارز دیجیتال — ${ua} USD`, ci.invoiceUrl, "success")]);
-    rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
-    let msg = `⭐️ <b>عضویت Pro</b>\n\n🎁 مزایا:\n• دانلود با اینترنت ملی\n• نگهداری تا ۱ روز\n• اولویت صف\n• ${DAILY_LIMIT_PRO} فایل کل (${DAILY_DIRECT_LIMIT_PRO} فایل مستقیم)\n• حجم فایل: ${await getProFileSizeLimitMB(env)} MB\n`;
-    if (globalDiscount) msg += `\n🎉 <b>تخفیف ویژه</b>\n<s>${baseStars} Stars | ${baseUsd}$</s>  ➡️  <b>${sa} Stars | ${ua}$</b>`;
-    else msg += `\n💰 ${sa} Stars | ${ua} USD`;
-    if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msg, { inline_keyboard: rows }, TOKEN);
-    else await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
-    return;
-  }
+  const startTime = Date.now();
+  let sent = 0, fail = 0;
+  const discount = await getDiscountSettings(env);
+  const kb = discount
+    ? { inline_keyboard: [[colorBtn(`🎁 اشتراک Pro با تخفیف ویژه`, "discount_pro", "success")], ...MAIN_KEYBOARD.inline_keyboard] }
+    : { inline_keyboard: [[colorBtn(`⭐️ خرید اشتراک Pro`, "pro_info", "green")], ...MAIN_KEYBOARD.inline_keyboard] };
 
-  let msg = `⭐️ <b>پلن‌های عضویت Pro</b>\n\n`;
-  const rows = [];
-  for (const plan of plans) {
-    const planDiscount = await getPlanDiscountForPlan(env, plan.id);
-    const starsPrice = planDiscount ? Math.round(plan.stars_price * (1 - planDiscount.discount_percent / 100)) : plan.stars_price;
-    const usdPrice = planDiscount ? parseFloat((plan.usd_price * (1 - planDiscount.discount_percent / 100)).toFixed(2)) : plan.usd_price;
-    const maxFileMB = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
+  const chunkSize = 20; // استفاده از چانک‌های موازی برای جلوگیری از تایم‌اوت و بلاک‌شدن
+  
+  for (let i = 0; i < total; i += chunkSize) {
+    const cancelled = await dbIsBroadcastCancelled(env, adminChatId);
+    if (cancelled) {
+      const el = Math.round((Date.now() - startTime) / 1000);
+      await dbSaveBroadcastState(env, adminChatId, { total, sent, fail, status: 'cancelled', messageId: statusMsgId, startTime });
+      if (statusMsgId) await editMessage(adminChatId, statusMsgId, `⛔ <b>ارسال لغو شد</b>\n\n👥 کل: ${total} | ✅ ${sent} | ❌ ${fail}\n⏱️ ${Math.floor(el / 60)}:${String(el % 60).padStart(2, '0')}`, ADMIN_KEYBOARD, TOKEN);
+      return;
+    }
+
+    const chunk = users.slice(i, i + chunkSize);
+    await Promise.all(chunk.map(async (userChatId) => {
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: userChatId, text: messageText + BOT_SIGNATURE, parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: JSON.stringify(kb) })
+        });
+        const rd = await res.json().catch(() => ({ ok: false }));
+        rd.ok ? sent++ : fail++;
+      } catch { fail++; }
+    }));
+
+    const processed = Math.min(i + chunkSize, total);
+    if (processed % 100 === 0 || processed === total) {
+      const el = Math.round((Date.now() - startTime) / 1000);
+      const pct = Math.round((processed) / total * 100);
+      await dbSaveBroadcastState(env, adminChatId, { total, sent, fail, status: 'running', messageId: statusMsgId, startTime });
+      if (statusMsgId) {
+        try {
+          await editMessage(adminChatId, statusMsgId, `📨 <b>در حال ارسال...</b>\n\n📊 ${processed} از ${total} (${pct}٪)\n✅ موفق: ${sent} | ❌ ناموفق: ${fail}\n⏱️ ${Math.floor(el / 60)}:${String(el % 60).padStart(2, '0')}\n🕐 ${new Date().toLocaleTimeString('fa-IR')}\n\nبرای لغو: /cancel_broadcast`, ADMIN_KEYBOARD, TOKEN);
+        } catch (e) { console.error('editMessage in broadcast error:', e); }
+      }
+    }
     
-    if (planDiscount) {
-      msg += `🏷 <b>${plan.name}</b>\n   📅 مدت: ${plan.duration_days} روز\n   📁 ${plan.daily_files} فایل کل (${plan.daily_direct_files} مستقیم)\n   💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB\n   🎉 تخفیف ${planDiscount.discount_percent}٪\n   💰 <s>${plan.stars_price} Stars | ${plan.usd_price}$</s>  ➡️  <b>${starsPrice} Stars | ${usdPrice}$</b>\n\n`;
-    } else {
-      msg += `🔹 <b>${plan.name}</b>\n   📅 مدت: ${plan.duration_days} روز\n   📁 ${plan.daily_files} فایل کل (${plan.daily_direct_files} مستقیم)\n   💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB\n   💰 ${plan.stars_price} Stars | ${plan.usd_price}$\n\n`;
-    }
-    rows.push([
-        colorBtn(`${planDiscount ? '🎉' : '⭐️'} ${plan.name} — ${starsPrice} Stars`, `buy_plan_stars:${plan.id}`, "primary"), 
-        colorBtn(`💰 ${usdPrice}$`, `buy_plan_usd:${plan.id}`, "success")
-    ]);
+    // توقف کوتاه بین هر چانک برای جلوگیری از بلاک شدن توسط تلگرام (Rate Limit)
+    if (processed < total) await new Promise(r => setTimeout(r, 800));
   }
-  rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
-  if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msg, { inline_keyboard: rows }, TOKEN);
-  else await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
+
+  const el = Math.round((Date.now() - startTime) / 1000);
+  await dbSaveBroadcastState(env, adminChatId, { total, sent, fail, status: 'completed', messageId: statusMsgId, startTime });
+  if (statusMsgId) {
+    try {
+      await editMessage(adminChatId, statusMsgId, `✅ <b>ارسال تکمیل شد!</b>\n\n👥 کل: ${total}\n✅ موفق: ${sent} | ❌ ناموفق: ${fail}\n📈 ${Math.round(sent / total * 100)}٪\n⏱️ ${Math.floor(el / 60)}:${String(el % 60).padStart(2, '0')}\n🕐 ${new Date().toLocaleTimeString('fa-IR')}`, ADMIN_KEYBOARD, TOKEN);
+    } catch (e) { console.error('editMessage final broadcast error:', e); }
+  }
 }
+
+// ============================================================
+// نوتیفیکیشن انقضای Pro
+// ============================================================
+
+async function sendRenewalNotifications(env, TOKEN) {
+  try {
+    const notifyHours = await getRenewalNotifyHours(env);
+    const renewalDiscount = await getRenewalDiscountPercent(env);
+    const now = Math.floor(Date.now() / 1000);
+    const windowStart = now + (notifyHours * 3600) - 1800;
+    const windowEnd = now + (notifyHours * 3600) + 1800;
+    
+    const expiring = await env.DB.prepare(
+      'SELECT pu.chat_id, pu.expires_at, pu.plan_snapshot FROM pro_users pu WHERE pu.expires_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM renewal_notifications rn WHERE rn.chat_id = pu.chat_id AND rn.notified_at > ?)'
+    ).bind(windowStart, windowEnd, now - (notifyHours * 3600 * 2)).all();
+    
+    for (const user of (expiring.results || [])) {
+      const chatId = user.chat_id;
+      let planName = 'استاندارد';
+      let planId = null;
+      let starsPrice = await getEffectiveStarsPrice(env);
+      let usdPrice = await getEffectiveUsdPrice(env);
+      if (user.plan_snapshot) {
+        try {
+          const ps = JSON.parse(user.plan_snapshot);
+          planName = ps.name || 'استاندارد';
+          planId = ps.plan_id || null;
+          if (planId) {
+            const plan = await getProPlanById(env, planId);
+            if (plan) { starsPrice = plan.stars_price; usdPrice = plan.usd_price; }
+          }
+        } catch {}
+      }
+      if (renewalDiscount > 0) {
+        starsPrice = Math.round(starsPrice * (1 - renewalDiscount / 100));
+        usdPrice = parseFloat((usdPrice * (1 - renewalDiscount / 100)).toFixed(2));
+      }
+      const hoursLeft = Math.round((user.expires_at - now) / 3600);
+      const starsInv = await createStarsInvoiceLink(env, chatId, starsPrice, planId, true);
+      const usdInv = await createNowPaymentsInvoice(env, chatId, usdPrice, planId, true);
+      const rows = [];
+      if (renewalDiscount > 0) {
+        if (starsInv.success) rows.push([{ text: `⭐️ تمدید با Stars — ${starsPrice} (${renewalDiscount}٪ تخفیف)`, url: starsInv.invoiceLink }]);
+        if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$ (${renewalDiscount}٪ تخفیف)`, url: usdInv.invoiceUrl }]);
+      } else {
+        if (starsInv.success) rows.push([{ text: `⭐️ تمدید با Stars — ${starsPrice}`, url: starsInv.invoiceLink }]);
+        if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$`, url: usdInv.invoiceUrl }]);
+      }
+      rows.push([colorBtn("👑 مشاهده پلن‌ها", "pro_info", "primary")]);
+      
+      let msg = `⏰ <b>اشتراک Pro شما به زودی منقضی می‌شود!</b>\n\n`;
+      msg += `💎 پلن: ${planName}\n`;
+      msg += `📅 انقضا: حدود ${hoursLeft} ساعت دیگر\n\n`;
+      if (renewalDiscount > 0) {
+        msg += `🎁 <b>تخفیف ویژه تمدید: ${renewalDiscount}٪</b>\n`;
+        msg += `این تخفیف فقط برای تمدید اشتراک فعلی شما در نظر گرفته شده است.\n\n`;
+      }
+      msg += `برای تمدید اشتراک و استفاده بدون وقفه از امکانات Pro، از دکمه‌های زیر اقدام کنید.`;
+      
+      try {
+        await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
+        await env.DB.prepare('INSERT OR REPLACE INTO renewal_notifications (chat_id, notified_at) VALUES (?, ?)').bind(chatId, now).run();
+        
+        // نوتیف به مدیریت
+        if (env.ADMIN_CHAT_ID) {
+           await sendSimple(env.ADMIN_CHAT_ID, `🔴 <b>هشدار انقضای اشتراک</b>\n\n👤 شناسه: <code>${chatId}</code>\n📦 پلن: ${planName}\n⏰ تا انقضا: ${hoursLeft} ساعت`, TOKEN);
+        }
+      } catch (e) { console.error('sendRenewalNotification error for', chatId, e); }
+    }
+  } catch (e) { console.error('sendRenewalNotifications error:', e); }
+}
+
+
+
+// ============================================================
+// پردازش فایل
+// ============================================================
 
 async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
   try {
-    let finalUrl = fileUrl || '';
-    let finalId = '';
-    if (finalUrl.startsWith('tg_file_id:')) {
-      finalId = finalUrl.replace('tg_file_id:', '');
-      finalUrl = ''; 
-    }
+    let finalUrl = fileUrl;
+    let fileId = "";
     
+    // اگر لینک ارسال شده در واقع یک File ID مستقیم از تلگرام باشد
+    if (fileUrl && fileUrl.startsWith('tg_file_id:')) {
+      fileId = fileUrl.replace('tg_file_id:', '');
+      finalUrl = ""; // لینک خالی می‌فرستیم تا گیت‌هاب اکشنز از file_id استفاده کند
+    }
+
     const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
       method: 'POST', headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' },
-      body: JSON.stringify({ ref: 'main', inputs: { file_url: finalUrl, file_id: finalId, zip_password: password, user_id: userId } })
+      body: JSON.stringify({ ref: 'main', inputs: { file_url: finalUrl, file_id: fileId, zip_password: password, user_id: userId } })
     });
     return res.ok;
   } catch { return false; }
@@ -788,8 +1223,11 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
         await new Promise(x => setTimeout(x, RETRY_INTERVAL)); 
     }
   }
-  if (!sent) { await sendSimple(chatId, "❌ ارسال به GitHub شکست خورد.", TOKEN); await finishTask(env); return; }
-  
+  if (!sent) { 
+      await sendSimple(chatId, "❌ ارسال به GitHub شکست خورد.", TOKEN);
+      await finishTask(env); 
+      return; 
+  }
   let started = false;
   for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
     await new Promise(x => setTimeout(x, START_WAIT_INTERVAL));
@@ -816,39 +1254,46 @@ async function finishTask(env) {
 }
 
 // ============================================================
-// پردازش لینک یا فایل مستقیم
+// پردازش لینک
 // ============================================================
 
 async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
   const isPro = await isProUser(env, chatId);
   const planInfo = isPro ? await getUserActivePlan(env, chatId) : null;
-  const isDirectRequest = fileUrl.startsWith('tg_file_id:');
-  const { allowed, remaining, limit, remainingDirect, limitDirect } = await canUpload(env, chatId, isPro, planInfo, isDirectRequest);
+  const isDirect = fileUrl.startsWith('tg_file_id:');
+  const { allowed, limit, limitDirect } = await canUpload(env, chatId, isPro, planInfo, isDirect);
   
   if (!allowed) {
-    if (isDirectRequest && remaining > 0 && remainingDirect <= 0) {
-      await sendMessage(chatId, `❌ سهمیه ارسال مستقیم شما (${limitDirect} فایل) به پایان رسیده است.\n\nشما هنوز <b>${remaining} سهمیه</b> برای دریافت از طریق لینک مستقیم دارید. لطفاً فایل را در ربات واسطه (<b>@filesto_bot</b>) به لینک تبدیل کرده و لینک را اینجا بفرستید.`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "green")], ...MAIN_KEYBOARD.inline_keyboard] }, TOKEN);
+    const normalDailyFiles = await getNormalDailyFiles(env);
+    const normalDirectFiles = await getNormalDailyDirectFiles(env);
+    if (isDirect) {
+      await sendMessage(chatId, `❌ به سهمیه ارسال مستقیم (${limitDirect} فایل) رسیده‌اید.\n\nکاربران عادی: ${normalDirectFiles} مستقیم در روز\nبرای افزایش سهمیه، عضویت Pro تهیه کنید.`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "green")], ...MAIN_KEYBOARD.inline_keyboard] }, TOKEN);
     } else {
-      const normalDailyFiles = await getNormalDailyFiles(env);
-      await sendMessage(chatId, `❌ به سهمیه روزانه کل خود (${limit} فایل) رسیده‌اید.\n\nکاربران عادی: ${normalDailyFiles} فایل کل در روز\nبرای افزایش سهمیه، عضویت Pro تهیه کنید.`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "green")], ...MAIN_KEYBOARD.inline_keyboard] }, TOKEN);
+      await sendMessage(chatId, `❌ به سهمیه کل روزانه (${limit} فایل) رسیده‌اید.\n\nکاربران عادی: ${normalDailyFiles} فایل در روز\nبرای افزایش سهمیه، عضویت Pro تهیه کنید.`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "green")], ...MAIN_KEYBOARD.inline_keyboard] }, TOKEN);
     }
     return;
   }
-
   await deleteUserBranch(env, chatId);
   await dbDeleteUserState(env, chatId);
   await dbRemoveFromQueue(env, chatId);
   
   const repoSize = await getRepoSize(env);
-  if (repoSize >= REPO_SIZE_LIMIT_GB) { await sendMessage(chatId, `❌ مخزن پر است. بعداً تلاش کنید.`, MAIN_KEYBOARD, TOKEN); return; }
+  if (repoSize >= REPO_SIZE_LIMIT_GB) { 
+      await sendMessage(chatId, `❌ مخزن پر است. بعداً تلاش کنید.`, MAIN_KEYBOARD, TOKEN); 
+      return;
+  }
   if (repoSize >= REPO_SIZE_WARNING_GB) await sendMessage(chatId, `⚠️ مخزن نزدیک به پر شدن (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت).`, MAIN_KEYBOARD, TOKEN);
   
-  const actualFileSize = fileSize || (isDirectRequest ? 0 : await getFileSize(fileUrl));
+  const actualFileSize = fileSize || await getFileSize(fileUrl);
 
   let maxFileSizeMB;
-  if (isPro && planInfo && planInfo.max_file_size_mb) { maxFileSizeMB = planInfo.max_file_size_mb; } 
-  else if (isPro) { maxFileSizeMB = await getProFileSizeLimitMB(env); } 
-  else { maxFileSizeMB = await getNormalFileSizeLimitMB(env); }
+  if (isPro && planInfo && planInfo.max_file_size_mb) {
+    maxFileSizeMB = planInfo.max_file_size_mb;
+  } else if (isPro) {
+    maxFileSizeMB = await getProFileSizeLimitMB(env);
+  } else {
+    maxFileSizeMB = await getNormalFileSizeLimitMB(env);
+  }
   
   const absoluteMaxMB = isPro ? (await getProFileSizeLimitMB(env)) : 2048;
   const effectiveMaxMB = isPro ? maxFileSizeMB : absoluteMaxMB;
@@ -874,20 +1319,163 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
     planRows.push([colorBtn("❌ لغو", "cancel_input", "danger")]);
     
     await sendMessage(chatId,
-      `📦 <b>فایل شما دریافت شد!</b>\n\nاما حجم فایل از سهمیه باقی‌مانده شما بیشتر است:\n\n📏 حجم فایل: ${((actualFileSize || 0) / (1024 * 1024)).toFixed(1)} مگابایت\n🚫 حد مجاز کاربران عادی: ${normalSizeLimitMB} مگابایت\n\n✅ <b>فایل شما در حال پردازش است.</b>\nبرای دریافت لینک دانلود، باید اشتراک Pro تهیه کنید.\n\n⏰ <b>مهلت پرداخت: ۱ ساعت</b>\nاگر در این مدت Pro نشوید، فایل از سرور حذف می‌شود.\n\n🔐 ابتدا رمز عبور ZIP را وارد کنید:\n\n📊 سهمیه روزانه: ${normalVolMB} مگابایت برای کاربران عادی\n\n👑 <b>پلن‌های Pro برای دریافت لینک:</b>`,
+      `📦 <b>${isDirect ? 'فایل مستقیم' : 'لینک ملی'} شما آماده است!</b>\n\nاما حجم فایل از سهمیه باقی‌مانده شما بیشتر است:\n\n📏 حجم فایل: ${((actualFileSize || 0) / (1024 * 1024)).toFixed(1)} مگابایت\n🚫 حد مجاز کاربران عادی: ${normalSizeLimitMB} مگابایت\n\n✅ <b>فایل شما در حال آپلود روی سرور است.</b>\nبرای دریافت لینک دانلود، باید اشتراک Pro تهیه کنید.\n\n⏰ <b>مهلت پرداخت: ۱ ساعت</b>\nاگر در این مدت Pro نشوید، فایل از سرور حذف می‌شود.\n\n🔐 ابتدا رمز عبور ZIP را وارد کنید:\n\n📊 سهمیه روزانه: ${normalVolMB} مگابایت برای کاربران عادی\n\n👑 <b>پلن‌های Pro برای دریافت لینک:</b>`,
       { inline_keyboard: planRows }, TOKEN);
     return;
   }
 
   const vc = await canUploadByVolume(env, chatId, actualFileSize || 0, isPro, planInfo);
   if (!vc.allowed) {
-    const limitMB = isPro ? (planInfo?.daily_volume_gb ? planInfo.daily_volume_gb * 1024 : DAILY_VOLUME_PRO_BYTES / (1024 * 1024)) : await getNormalDailyVolumeMB(env);
+    const limitMB = isPro
+      ? (planInfo?.daily_volume_gb ? planInfo.daily_volume_gb * 1024 : DAILY_VOLUME_PRO_BYTES / (1024 * 1024))
+      : await getNormalDailyVolumeMB(env);
     await sendMessage(chatId, `❌ حجم فایل (${((actualFileSize || 0) / (1024 * 1024)).toFixed(1)} مگابایت) بیشتر از سهمیه باقیمانده (${(vc.remainingBytes / (1024 * 1024)).toFixed(1)} مگابایت) است.\nمحدودیت روزانه: ${limitMB} مگابایت`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "green")], ...MAIN_KEYBOARD.inline_keyboard] }, TOKEN);
     return;
   }
 
+  // گرفتن سهمیه‌های آپدیت شده برای نمایش
+  const quota = await canUpload(env, chatId, isPro, planInfo, false);
+  const remainingStr = `${quota.remaining} کل | ${quota.remainingDirect} مستقیم`;
+
   await dbSetUserState(env, chatId, 'awaiting_password', { url: fileUrl, fileSize: actualFileSize || 0 });
-  await sendMessage(chatId, `✅ <b>فایل تایید شد!</b>\n\n🔐 رمز عبور دلخواه برای فایل ZIP را وارد کنید:\n\n📊 سهمیه کل: ${remaining} از ${limit} فایل | مستقیم: ${remainingDirect} از ${limitDirect}`, { inline_keyboard: [[colorBtn("❌ لغو", "cancel_input", "danger")]] }, TOKEN);
+  await sendMessage(chatId, `✅ <b>${isDirect ? 'فایل مستقیم' : 'لینک'} دریافت شد!</b>\n\n🔐 رمز عبور ZIP را وارد کنید:\n\n📊 سهمیه: ${remainingStr}`, { inline_keyboard: [[colorBtn("❌ لغو", "cancel_input", "danger")]] }, TOKEN);
+}
+
+
+// ============================================================
+// نمایش پلن‌های Pro به کاربر با پشتیبانی از کد تخفیف
+// ============================================================
+
+async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon) {
+  const isPro = await isProUser(env, chatId);
+  if (isPro) {
+    const row = await env.DB.prepare('SELECT expires_at, plan_snapshot FROM pro_users WHERE chat_id = ?').bind(chatId).first();
+    let planName = 'استاندارد';
+    if (row?.plan_snapshot) {
+      try { const ps = JSON.parse(row.plan_snapshot);
+      planName = ps.name || 'استاندارد'; } catch {}
+    }
+    const planInfo = await getUserActivePlan(env, chatId);
+    const dailyFiles = planInfo?.daily_files || DAILY_LIMIT_PRO;
+    const dailyDirect = planInfo?.daily_direct_files !== undefined ? planInfo.daily_direct_files : 3;
+    const dailyVolMB = planInfo?.daily_volume_gb ? planInfo.daily_volume_gb * 1024 : DAILY_VOLUME_PRO_BYTES / (1024 * 1024);
+    const maxFileMB = planInfo?.max_file_size_mb || (await getProFileSizeLimitMB(env));
+    const proTTL = await getProMaxTimeSec(env);
+    const proTTLText = proTTL >= 86400 ?
+    `${Math.round(proTTL / 86400)} روز` : `${Math.round(proTTL / 3600)} ساعت`;
+    const msgText = `⭐️ <b>اشتراک Pro فعال است</b>\n\n📦 پلن: ${planName}\n📅 انقضا: ${new Date(row.expires_at * 1000).toLocaleDateString('fa-IR')}\n\n🎁 مزایا:\n• دانلود با اینترنت ملی\n• نگهداری فایل تا ${proTTLText}\n• اولویت در صف\n• 📁 ${dailyFiles} فایل کل و 🚀 ${dailyDirect} آپلود مستقیم در روز\n• 💾 ${dailyVolMB} مگابایت در روز\n• حداکثر حجم هر فایل: ${maxFileMB} مگابایت`;
+    if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msgText, MAIN_KEYBOARD, TOKEN);
+    else await sendMessage(chatId, msgText, MAIN_KEYBOARD, TOKEN);
+    return;
+  }
+
+  const plans = await getProPlans(env);
+  const baseStars = await getEffectiveStarsPrice(env);
+  const baseUsd = await getEffectiveUsdPrice(env);
+  const globalDiscount = await getDiscountSettings(env);
+
+  if (!plans || plans.length === 0) {
+    const sa = globalDiscount ? globalDiscount.starsPrice : baseStars;
+    const ua = globalDiscount ? globalDiscount.usdPrice : baseUsd;
+    const si = await createStarsInvoiceLink(env, chatId, sa, null);
+    const ci = await createNowPaymentsInvoice(env, chatId, ua, null);
+    const rows = [];
+    if (si.success) rows.push([colorBtn(`⭐️ خرید با Stars — ${sa} Stars`, si.invoiceLink, "primary")]);
+    if (ci.success) rows.push([colorBtn(`💰 ارز دیجیتال — ${ua} USD`, ci.invoiceUrl, "success")]);
+    rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
+    if (rows.length === 1) {
+      if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, "❌ روش پرداختی در دسترس نیست.", MAIN_KEYBOARD, TOKEN);
+      else await sendMessage(chatId, "❌ روش پرداختی در دسترس نیست.", MAIN_KEYBOARD, TOKEN);
+      return;
+    }
+    const normalDailyFiles = await getNormalDailyFiles(env);
+    const normalDailyDirect = await getNormalDailyDirectFiles(env);
+    const normalVolMB = await getNormalDailyVolumeMB(env);
+    const proFileSizeMB = await getProFileSizeLimitMB(env);
+    let msg = `⭐️ <b>عضویت Pro</b>\n\n🎁 مزایا:\n• دانلود با اینترنت ملی و صرفه‌جویی در حجم VPN\n• نگهداری فایل تا <b>۱ روز</b> (کاربران عادی: ۱ ساعت)\n• اولویت در صف\n• <b>${DAILY_LIMIT_PRO} فایل (۳ مستقیم) و ${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز (عادی: ${normalDailyFiles} فایل و ${normalDailyDirect} مستقیم و ${normalVolMB} مگابایت)\n• حداکثر حجم هر فایل: ${proFileSizeMB} مگابایت\n\n💰 هزینه:\n`;
+    if (globalDiscount) {
+      const tl = Math.max(0, Math.round((globalDiscount.expiresAt - Math.floor(Date.now() / 1000)) / 60));
+      msg += `\n🎉 <b>تخفیف ویژه</b> ⏰ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'} باقیمانده\n<s>${baseStars} Stars | ${baseUsd}$</s>  ➡️  <b>${sa} Stars | ${ua}$</b>`;
+    } else {
+      msg += `• Stars: <b>${sa} Stars</b>\n• ارز دیجیتال: <b>${ua} USD</b>`;
+    }
+    if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msg, { inline_keyboard: rows }, TOKEN);
+    else await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
+    return;
+  }
+
+  let msg = `⭐️ <b>پلن‌های عضویت Pro</b>\n\n`;
+  const rows = [];
+  for (const plan of plans) {
+    const planDiscount = await getPlanDiscountForPlan(env, plan.id);
+    const starsPrice = planDiscount ? Math.round(plan.stars_price * (1 - planDiscount.discount_percent / 100)) : plan.stars_price;
+    const usdPrice = planDiscount ?
+    parseFloat((plan.usd_price * (1 - planDiscount.discount_percent / 100)).toFixed(2)) : plan.usd_price;
+    const maxFileMB = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
+    if (planDiscount) {
+      const tl = Math.max(0, Math.round((planDiscount.expires_at - Math.floor(Date.now() / 1000)) / 60));
+      msg += `🏷 <b>${plan.name}</b>\n`;
+      msg += `   📅 مدت: ${plan.duration_days} روز\n`;
+      msg += `   📁 ${plan.daily_files} کل | 🚀 ${plan.daily_direct_files} مستقیم/روز | 💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n`;
+      msg += `   🎉 تخفیف ${planDiscount.discount_percent}٪ | ⏰ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'}\n`;
+      msg += `   💰 <s>${plan.stars_price} Stars | ${plan.usd_price}$</s>  ➡️  <b>${starsPrice} Stars | ${usdPrice}$</b>\n\n`;
+    } else {
+      msg += `🔹 <b>${plan.name}</b>\n`;
+      msg += `   📅 مدت: ${plan.duration_days} روز\n`;
+      msg += `   📁 ${plan.daily_files} کل | 🚀 ${plan.daily_direct_files} مستقیم/روز | 💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n`;
+      msg += `   💰 ${plan.stars_price} Stars | ${plan.usd_price}$\n\n`;
+    }
+    rows.push([
+        colorBtn(`${planDiscount ? '🎉' : '⭐️'} ${plan.name} — ${starsPrice} Stars`, `buy_plan_stars:${plan.id}`, "primary"), 
+        colorBtn(`💰 ${usdPrice}$`, `buy_plan_usd:${plan.id}`, "success")
+    ]);
+  }
+  rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
+  if (msgIdToEdit) await editMessage(chatId, msgIdToEdit, msg, { inline_keyboard: rows }, TOKEN);
+  else await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
+}
+
+// ============================================================
+// ایجاد جداول لازم
+// ============================================================
+
+async function ensureTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS admin_temp_state (chat_id TEXT PRIMARY KEY, state_data TEXT, updated_at INTEGER)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS broadcast_state (admin_chat_id TEXT PRIMARY KEY, total INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, status TEXT DEFAULT 'idle', message_id INTEGER, start_time INTEGER, updated_at INTEGER)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pro_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, duration_days INTEGER NOT NULL, daily_files INTEGER NOT NULL, daily_direct_files INTEGER DEFAULT 3, daily_volume_gb REAL NOT NULL, stars_price INTEGER NOT NULL, usd_price REAL NOT NULL, max_file_size_mb INTEGER DEFAULT 2048, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS plan_discounts (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER NOT NULL, discount_percent REAL NOT NULL, active INTEGER DEFAULT 1, expires_at INTEGER NOT NULL)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS oversized_pending (chat_id TEXT PRIMARY KEY, file_url TEXT, file_size INTEGER, password TEXT, branch_name TEXT, created_at INTEGER)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS renewal_notifications (chat_id TEXT PRIMARY KEY, notified_at INTEGER)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_chat_id TEXT NOT NULL, new_user_chat_id TEXT NOT NULL UNIQUE, created_at INTEGER, valid INTEGER DEFAULT 1)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referral_rewards (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, tier_count INTEGER NOT NULL, created_at INTEGER, claimed INTEGER DEFAULT 0, UNIQUE(chat_id, tier_count))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS referral_buy_bonuses (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_chat_id TEXT NOT NULL, buyer_chat_id TEXT NOT NULL, created_at INTEGER, UNIQUE(referrer_chat_id, buyer_chat_id))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS coupons (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL UNIQUE, discount_percent REAL NOT NULL, plan_id INTEGER, max_uses INTEGER, used_count INTEGER DEFAULT 0, expires_at INTEGER, active INTEGER DEFAULT 1, created_at INTEGER)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS coupon_uses (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, chat_id TEXT NOT NULL, used_at INTEGER, UNIQUE(code, chat_id))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (chat_id TEXT PRIMARY KEY, first_seen INTEGER, name TEXT)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_limits (chat_id TEXT PRIMARY KEY, file_count INTEGER DEFAULT 0, direct_file_count INTEGER DEFAULT 0, reset_date INTEGER, daily_volume_bytes INTEGER)`).run();
+  
+  try { await env.DB.prepare(`ALTER TABLE pro_users ADD COLUMN plan_snapshot TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN max_file_size_mb INTEGER DEFAULT 2048`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN daily_direct_files INTEGER DEFAULT 3`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN password TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN branch_name TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN name TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE daily_limits ADD COLUMN direct_file_count INTEGER DEFAULT 0`).run(); } catch {}
+}
+
+function getMainKeyboardForAdmin(adminChatId, chatId) {
+  const kb = {
+    inline_keyboard: [
+      [colorBtn("📥 دریافت لینک ملی", "new_link_check", "primary")],
+      [colorBtn("📊 آمار لحظه‌ای", "stats", "blue"), colorBtn("👤 وضعیت من", "status", "blue")],
+      [colorBtn("⭐️ عضویت Pro", "pro_info", "green"), colorBtn("🗑 حذف فایل من", "delete_my_file", "red")],
+      [colorBtn("🎁 اشتراک رایگان Pro", "referral_menu", "blue"), colorBtn("🏷 کد تخفیف", "use_discount_code", "blue")],
+      [colorBtn("❓ راهنما", "help", "blue"), { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }]
+    ]
+  };
+  if (adminChatId && chatId === adminChatId) kb.inline_keyboard.push([colorBtn("🛠 پنل مدیریت", "admin_panel", "primary")]);
+  return kb;
 }
 
 // ============================================================
@@ -956,7 +1544,7 @@ export default {
         if (user_id) { 
             const chatId = user_id.split('_')[0]; 
             await env.DB.prepare('UPDATE user_state SET started_at = ? WHERE chat_id = ?').bind(Date.now(), chatId).run();
-            await sendMessage(chatId, "🔄 پردازش روی سرور آغاز شد...", MAIN_KEYBOARD, TOKEN);
+            await sendMessage(chatId, "🔄 پردازش روی GitHub آغاز شد...", MAIN_KEYBOARD, TOKEN);
         }
         return new Response('OK');
       } catch { return new Response('OK'); }
@@ -1001,8 +1589,10 @@ export default {
             const expiresAt = Math.floor(Date.now() / 1000) + proTTL;
             await dbSetBranchForUser(env, chatId, branch, expiresAt);
             await dbIncrementLinks(env, totalSizeBytes / (1024 * 1024 * 1024));
+            
             const isDirect = oversizedRow.file_url && oversizedRow.file_url.startsWith('tg_file_id:');
             await incrementDailyLimit(env, chatId, totalSizeBytes, isDirect);
+            
             await incrementUserStats(env, chatId, totalSizeBytes);
             const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
             let password = oversizedRow.password || '';
@@ -1040,10 +1630,18 @@ export default {
         await dbSetBranchForUser(env, chatId, branch, expiresAt);
         await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
         await dbIncrementLinks(env, totalSizeBytes / (1024 * 1024 * 1024));
+        
         const reqRow = await env.DB.prepare('SELECT request_data FROM user_state WHERE chat_id = ?').bind(chatId).first();
         let isDirect = false;
         let password = '';
-        if (reqRow?.request_data) { try { const rd = JSON.parse(reqRow.request_data); password = rd.password || ''; isDirect = rd.url && rd.url.startsWith('tg_file_id:'); } catch {} }
+        if (reqRow?.request_data) {
+           try { 
+             const rd = JSON.parse(reqRow.request_data); 
+             password = rd.password || ''; 
+             isDirect = rd.url && rd.url.startsWith('tg_file_id:');
+           } catch {} 
+        }
+        
         await incrementDailyLimit(env, chatId, totalSizeBytes, isDirect);
         await incrementUserStats(env, chatId, totalSizeBytes);
         
@@ -1052,7 +1650,7 @@ export default {
         const ttlText = isPro ?
         (planInfo?.duration_days ? planInfo.duration_days + ' روز' : '۱ روز') : `${Math.round(normalTTL / 3600)} ساعت`;
         await sendMessage(chatId,
-          `✅ <b>فایل آماده است!</b>\n\n🔗 لینک دانلود (${ttlText} معتبر):\n${link}\n\n🔑 رمز: <code>${password}</code>${totalSizeBytes ? `\n📦 حجم: ${(totalSizeBytes / (1024 * 1024)).toFixed(2)} MB` : ''}\n\n📌 <b>استخراج:</b> با نرم‌افزار 7-Zip یا WinRAR فقط روی فایل <code>archive.7z.001</code> کلیک راست کرده و گزینه Extract را بزنید تا تمام پارت‌ها به هم بچسبند.\n\n${quotaText}`,
+          `✅ <b>فایل آماده است!</b>\n\n🔗 لینک دانلود (${ttlText} معتبر):\n${link}\n\n🔑 رمز: <code>${password}</code>${totalSizeBytes ? `\n📦 حجم: ${(totalSizeBytes / (1024 * 1024)).toFixed(2)} MB` : ''}\n\n📌 <b>استخراج:</b> با 7-Zip فایل <code>archive.7z.001</code> را استخراج کنید.\n\n${quotaText}`,
           { inline_keyboard: [[colorBtn("🗑 حذف فایل از سرور", "delete_my_file", "danger")], [colorBtn("📥 لینک جدید", "new_link_check", "primary")]] }, TOKEN);
         await dbDeleteUserState(env, chatId);
         await finishTask(env);
@@ -1085,6 +1683,7 @@ export default {
       } catch { return new Response('OK'); }
     }
 
+
     // ============================================================
     // وب‌هوک تلگرام
     // ============================================================
@@ -1093,6 +1692,7 @@ export default {
       try {
         const update = await request.json();
         
+        // ثبت کاربر و نامش
         const extractName = (from) => {
             if (!from) return 'کاربر';
             let name = from.first_name || '';
@@ -1103,6 +1703,7 @@ export default {
         if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString(), extractName(update.message.from));
         if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString(), extractName(update.callback_query.from));
 
+        // بررسی حالت maintenance
         if (update.message || update.callback_query) {
           const reqChatId = (update.message?.chat?.id || update.callback_query?.message?.chat?.id)?.toString();
           const isMaintenanceActive = await getMaintenanceMode(env);
@@ -1122,7 +1723,7 @@ export default {
 
         if (update.message?.text === '/cancel_broadcast' && update.message.chat.id.toString() === ADMIN_CHAT_ID) {
           await dbSetBroadcastCancelled(env, ADMIN_CHAT_ID);
-          await sendMessage(ADMIN_CHAT_ID, "⛔ درخواست لغو ثبت شد. ارسال در اولین فرصت متوقف می‌شود.", buildAdminKeyboard(await getDirectUploadEnabled(env)), TOKEN);
+          await sendMessage(ADMIN_CHAT_ID, "⛔ درخواست لغو ثبت شد. ارسال در اولین فرصت متوقف می‌شود.", ADMIN_KEYBOARD, TOKEN);
           return new Response('OK');
         }
 
@@ -1161,17 +1762,19 @@ export default {
           lastCallbackProcessed.set(`${chatId}_${data}`, now);
           await answerCallback(cb.id, TOKEN);
 
+          // ---- بررسی دریافت لینک جدید (نمایش تاییدیه حذف) ----
           if (data === 'new_link_check') {
             const lb = await dbGetLastBranch(env, chatId);
             const state = await dbGetUserState(env, chatId);
             if (lb || state) {
-                await editMessage(chatId, msgId, "⚠️ <b>توجه:</b> شما یک فایل یا درخواست پردازش در حال انجام دارید.\n\nدر صورتی که درخواست جدید بدهید، <b>فایل قبلی شما از سرور حذف خواهد شد.</b>\nآیا تایید می‌کنید؟", { inline_keyboard: [[colorBtn("✅ بله، فایل قبلی را حذف کن", "new_link", "success")], [colorBtn("❌ خیر، انصراف", "back_to_main", "danger")]] }, TOKEN);
+                await editMessage(chatId, msgId, "⚠️ <b>توجه:</b> شما یک فایل یا درخواست پردازش در حال انجام دارید.\n\nدر صورتی که درخواست لینک جدید بدهید، <b>فایل قبلی شما از سرور حذف خواهد شد.</b>\nآیا تایید می‌کنید؟", { inline_keyboard: [[colorBtn("✅ بله، فایل قبلی را حذف کن", "new_link", "success")], [colorBtn("❌ خیر، انصراف", "back_to_main", "danger")]] }, TOKEN);
                 return new Response('OK');
             } else {
-                data = 'new_link'; 
+                data = 'new_link'; // اجرای مستقیم دستور دریافت لینک در صورتی که فایل فعالی نداشت
             }
           }
 
+          // ---- خرید با کد تخفیف ----
           if (data.startsWith('coupon_buy_stars:') || data.startsWith('coupon_buy_usd:')) {
             const parts = data.split(':');
             const isStar = data.startsWith('coupon_buy_stars:');
@@ -1210,9 +1813,13 @@ export default {
             return new Response('OK');
           }
 
+          // ---- عضو شدم ----
           if (data === 'check_membership') {
             const pending = await getPendingLink(env, chatId);
-            if (!pending) { await editMessage(chatId, msgId, "❌ درخواست یافت نشد. دوباره ارسال کنید.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            if (!pending) {
+              await editMessage(chatId, msgId, "❌ لینک یافت نشد. دوباره ارسال کنید.", MAIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
             const channels = await getRequiredChannels(env);
             const isMember = await isUserMemberOfChannels(chatId, channels, TOKEN);
             if (!isMember) {
@@ -1225,6 +1832,7 @@ export default {
             return new Response('OK');
           }
 
+          // ---- منوی رفرال ----
           if (data === 'referral_menu') {
             const settings = await getReferralSettings(env);
             const refLink = await getReferralLink(env, chatId);
@@ -1237,7 +1845,9 @@ export default {
               const alreadyClaimed = await env.DB.prepare('SELECT id FROM referral_rewards WHERE chat_id = ? AND tier_count = ? AND claimed = 1').bind(chatId, tier.count).first();
               if (!alreadyClaimed) { claimable = true; break; }
             }
-            let msg = `🎁 <b>اشتراک رایگان Pro با دعوت دوستان</b>\n\n🔗 <b>لینک اختصاصی شما:</b>\n<code>${refLink}</code>\n\n👥 تعداد دعوت‌های معتبر شما: <b>${count} نفر</b>\n\n`;
+            let msg = `🎁 <b>اشتراک رایگان Pro با دعوت دوستان</b>\n\n`;
+            msg += `🔗 <b>لینک اختصاصی شما:</b>\n<code>${refLink}</code>\n\n`;
+            msg += `👥 تعداد دعوت‌های معتبر شما: <b>${count} نفر</b>\n\n`;
             if (tiers.length > 0) {
               msg += `🎯 <b>جوایز دعوت:</b>\n`;
               for (const tier of [...tiers].sort((a, b) => a.count - b.count)) {
@@ -1246,7 +1856,9 @@ export default {
               }
               msg += `\n`;
             }
-            if (nextTier && !claimable) { msg += `📊 تا جایزه بعدی: <b>${nextTier.count - count} نفر دیگر</b>`; }
+            if (nextTier && !claimable) {
+              msg += `📊 تا جایزه بعدی: <b>${nextTier.count - count} نفر دیگر</b>`;
+            }
             const kb = { inline_keyboard: [] };
             if (claimable) kb.inline_keyboard.push([colorBtn("🎁 دریافت جایزه / پاداش رفرال", "claim_referral_reward", "success")]);
             kb.inline_keyboard.push([{ text: "📤 ارسال لینک برای دوستان", switch_inline_query: `دعوت‌نامه ربات دانلودر:\n${refLink}` }]);
@@ -1256,14 +1868,22 @@ export default {
             return new Response('OK');
           }
 
+          // ---- کپی لینک رفرال ----
           if (data === 'copy_referral_link') {
             const refLink = await getReferralLink(env, chatId);
-            await sendMessage(chatId, `📋 <b>لینک دعوت شما:</b>\n\n<code>${refLink}</code>\n\nروی لینک بالا ضربه بزنید تا کپی شود، سپس برای دوستانتان ارسال کنید! 🎁`, { inline_keyboard: [[colorBtn("🔙 بازگشت به رفرال", "referral_menu", "primary")]] }, TOKEN);
+            await sendMessage(chatId,
+              `📋 <b>لینک دعوت شما:</b>\n\n<code>${refLink}</code>\n\nروی لینک بالا ضربه بزنید تا کپی شود، سپس برای دوستانتان ارسال کنید! 🎁`,
+              { inline_keyboard: [[colorBtn("🔙 بازگشت به رفرال", "referral_menu", "primary")]] }, TOKEN);
             return new Response('OK');
           }
 
-          if (data === 'claim_referral_reward') { await claimReferralReward(env, chatId, TOKEN); return new Response('OK'); }
+          // ---- دریافت جایزه رفرال ----
+          if (data === 'claim_referral_reward') {
+            await claimReferralReward(env, chatId, TOKEN);
+            return new Response('OK');
+          }
 
+          // ---- استفاده از کد تخفیف ----
           if (data === 'use_discount_code') {
             await dbDeleteAdminState(env, chatId);
             await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_code', isUser: true });
@@ -1271,57 +1891,65 @@ export default {
             return new Response('OK');
           }
 
-          if (data === 'cancel_coupon_input') { await dbDeleteAdminState(env, chatId); await editMessage(chatId, msgId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN); return new Response('OK'); }
-
-          if (data === 'cancel_oversized') {
-            const overPend = await env.DB.prepare('SELECT branch_name FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
-            if (overPend?.branch_name) { await deleteBranchFromGitHub(env, overPend.branch_name); await dbRemoveActiveBranch(env, overPend.branch_name); }
-            await env.DB.prepare('DELETE FROM oversized_pending WHERE chat_id = ?').bind(chatId).run();
-            await dbDeleteUserState(env, chatId);
-            await editMessage(chatId, msgId, "✅ پردازش لغو و فایل از سرور حذف شد.", MAIN_KEYBOARD, TOKEN);
+          // ---- لغو ورود کد تخفیف ----
+          if (data === 'cancel_coupon_input') {
+            await dbDeleteAdminState(env, chatId);
+            await editMessage(chatId, msgId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
             return new Response('OK');
           }
 
+          // ---- لغو oversized ----
+          if (data === 'cancel_oversized') {
+            const overPend = await env.DB.prepare('SELECT branch_name FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
+            if (overPend?.branch_name) {
+              await deleteBranchFromGitHub(env, overPend.branch_name);
+              await dbRemoveActiveBranch(env, overPend.branch_name);
+            }
+            await env.DB.prepare('DELETE FROM oversized_pending WHERE chat_id = ?').bind(chatId).run();
+            await dbDeleteUserState(env, chatId);
+            await editMessage(chatId, msgId, "✅ فایل از سرور حذف شد.", MAIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- لغو ----
           if (data === 'cancel_input') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
             await dbDeleteAdminState(env, chatId);
-            await editMessage(chatId, msgId, "❌ درخواست شما لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
+            await editMessage(chatId, msgId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
             return new Response('OK');
           }
 
-          if (data === 'back_to_main') { await dbDeleteAdminState(env, chatId); await editMessage(chatId, msgId, "🌀 منوی اصلی", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN); return new Response('OK'); }
+          // ---- منوی اصلی ----
+          if (data === 'back_to_main') {
+            await dbDeleteAdminState(env, chatId);
+            await editMessage(chatId, msgId, "🌀 منوی اصلی", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
+            return new Response('OK');
+          }
 
+          // ---- پنل مدیریت ----
           if (data === 'admin_panel') {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             await dbDeleteAdminState(env, chatId);
-            const isDirEn = await getDirectUploadEnabled(env);
-            await editMessage(chatId, msgId, "🛠 <b>پنل مدیریت ربات</b>", buildAdminKeyboard(isDirEn), TOKEN);
+            await editMessage(chatId, msgId, "🛠 <b>پنل مدیریت ربات</b>", ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
-          if (data === 'admin_direct_toggle') {
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-            const current = await getDirectUploadEnabled(env);
-            await setBotSetting(env, 'direct_upload_enabled', current ? '0' : '1');
-            await editMessage(chatId, msgId, `✅ قابلیت ارسال مستقیم فایل <b>${current ? 'غیرفعال' : 'فعال'}</b> شد.`, buildAdminKeyboard(!current), TOKEN);
-            return new Response('OK');
-          }
-
+          // ---- مانیتورینگ ----
           if (data === 'admin_monitoring') {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             const settings = await getBotSettings(env);
-            const isDirEn = await getDirectUploadEnabled(env);
             const starsP = await getEffectiveStarsPrice(env);
             const usdP = await getEffectiveUsdPrice(env);
             const normalVolMB = await getNormalDailyVolumeMB(env);
             const normalDailyFiles = await getNormalDailyFiles(env);
-            const normalDirectFiles = await getNormalDailyDirectFiles(env);
+            const normalDailyDirect = await getNormalDailyDirectFiles(env);
             const normalTTLh = Math.round((parseInt(settings['normal_max_time_sec'] || TTL_NORMAL)) / 3600);
             const proTTLd = Math.round((parseInt(settings['pro_max_time_sec'] || TTL_PRO)) / 86400);
             const normalSizeMB = settings['normal_file_size_limit_mb'] || '200';
             const proSizeMB = settings['pro_file_size_limit_mb'] || '2048';
             const maintenanceOn = settings['maintenance_mode'] === '1';
+            const directEnabled = await getDirectUploadEnabled(env);
             const exceptions = settings['maintenance_exceptions'] ? JSON.parse(settings['maintenance_exceptions']) : [];
             const plansCount = (await getProPlans(env)).length;
             const activeCount = await dbGetActiveCount(env);
@@ -1338,42 +1966,604 @@ export default {
               `🖥 <b>مانیتورینگ و وضعیت ربات</b>\n\n` +
               `👥 <b>کاربران:</b> ${usersCount} | ⭐️ Pro: ${proUsersCount}\n` +
               `🔄 در پردازش: ${activeCount} | ⏳ در صف: ${queueCount}\n` +
-              `🔗 کل درخواست‌ها: ${globalStats.total_links} | 💾 حجم کل: ${globalStats.total_volume_gb.toFixed(2)} GB\n` +
+              `🔗 کل لینک‌ها: ${globalStats.total_links} | 💾 حجم کل دانلود شده: ${globalStats.total_volume_gb.toFixed(2)} GB\n` +
               `📦 حجم مخزن: ${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} GB\n\n` +
               `💰 <b>قیمت‌های پایه:</b>\n` +
               `   Stars: ${starsP} | 💵 دلار: ${usdP}$\n\n` +
-              `📦 <b>محدودیت‌های عادی:</b>\n` +
-              `   📁 ${normalDailyFiles} فایل کل | 📥 ${normalDirectFiles} فایل مستقیم\n   📊 ${normalVolMB} مگابایت | 📏 ${normalSizeMB} مگابایت/فایل | ⏱ ${normalTTLh} ساعت\n\n` +
+              `📦 <b>محدودیت‌های کاربران عادی:</b>\n` +
+              `   📁 فایل روزانه: ${normalDailyFiles} (مستقیم: ${normalDailyDirect})\n` +
+              `   📊 حجم روزانه: ${normalVolMB} مگابایت\n` +
+              `   📏 حجم هر فایل: ${normalSizeMB} مگابایت\n` +
+              `   ⏱ ماندگاری: ${normalTTLh} ساعت\n\n` +
               `👑 <b>محدودیت‌های Pro (پیش‌فرض):</b>\n` +
-              `   📏 ${proSizeMB} مگابایت/فایل | ⏱ ${proTTLd} روز\n\n` +
-              `🔔 <b>تخفیف تمدید:</b> ${renewalDiscount > 0 ? renewalDiscount + '٪' : 'غیرفعال'} (${renewalHours}h قبل)\n\n` +
-              `🎁 <b>رفرال معتبر:</b> ${totalReferrals} | 🎟 <b>کد تخفیف فعال:</b> ${totalCoupons}\n\n` +
-              `🔴 <b>حالت بروزرسانی:</b> ${maintenanceOn ? 'فعال ⚡' : 'غیرفعال ✅'}`,
-              buildAdminKeyboard(isDirEn), TOKEN);
+              `   📏 حجم هر فایل: ${proSizeMB} مگابایت\n` +
+              `   ⏱ ماندگاری: ${proTTLd} روز\n\n` +
+              `👑 <b>پلن‌های Pro:</b> ${plansCount} پلن فعال\n\n` +
+              `🔔 <b>تخفیف تمدید:</b> ${renewalDiscount > 0 ? renewalDiscount + '٪' : 'غیرفعال'}\n` +
+              `⏰ <b>نوتیف انقضا:</b> ${renewalHours} ساعت قبل\n\n` +
+              `🎁 <b>رفرال‌های معتبر کل:</b> ${totalReferrals}\n` +
+              `🎟 <b>کدهای تخفیف فعال:</b> ${totalCoupons}\n\n` +
+              `🔴 <b>حالت بروزرسانی:</b> ${maintenanceOn ? 'فعال ⚡' : 'غیرفعال ✅'}\n` +
+              `⚡ <b>آپلود مستقیم:</b> ${directEnabled ? 'روشن ✅' : 'خاموش ❌'}\n` +
+              `🧪 <b>کاربران استثنا:</b> ${exceptions.length > 0 ? exceptions.join(', ') : 'ندارد'}`,
+              ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
-          // توزیع تمام دستورات ادمین به پنل کامل
-          if (data === 'admin_maintenance_toggle' || data === 'admin_referral_settings' || data.startsWith('admin_delete_coupon:') || data === 'admin_create_coupon' || data === 'admin_coupon_menu' || data.startsWith('admin_referral_user:') || data === 'admin_referral_stats' || data.startsWith('admin_referral_stats_page:') || data.startsWith('admin_delete_ref_tier:') || data === 'admin_referral_tiers_view' || data === 'admin_referral_tiers_wizard' || data.startsWith('admin_set_ref_bonus_plan:') || data === 'admin_referral_buy_bonus_plan' || data === 'admin_referral_buy_bonus_toggle' || data === 'admin_referral_toggle' || data === 'admin_pro_members' || data.startsWith('admin_pro_members_page:') || data.startsWith('admin_msg_pro:') || data === 'admin_renewal_discount' || data === 'admin_direct_message' || data === 'admin_set_prices' || data === 'admin_set_limits' || data === 'admin_plans_menu' || data === 'admin_add_plan' || data.startsWith('admin_edit_plan:') || data.startsWith('admin_toggle_plan:') || data.startsWith('admin_delete_plan:') || data === 'admin_plan_discounts' || data.startsWith('admin_set_plan_discount:') || data === 'admin_discount_menu' || data === 'admin_broadcast_status' || data === 'admin_reset_queue' || data === 'admin_start_queue' || data === 'admin_fix_active' || data === 'admin_promote' || data.startsWith('admin_promote_plan:') || data === 'admin_reset_quota' || data === 'admin_set_channel' || data === 'admin_show_channels' || data === 'admin_broadcast' || data === 'admin_set_discount' || data === 'admin_clear_discount' || data.startsWith('admin_remove_channel:') || data === 'admin_remove_all_channels') {
-            const isDirEn = await getDirectUploadEnabled(env);
-            await sendMessage(chatId, "🛠 لطفاً برای اجرای این دستور از پنل مدیریت (بخش اول کد ادمین در V5) استفاده کنید. تمام منوها فعال هستند.", buildAdminKeyboard(isDirEn), TOKEN);
+          // ---- toggle آپلود مستقیم ----
+          if (data === 'admin_toggle_direct') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const current = await getDirectUploadEnabled(env);
+            await setBotSetting(env, 'direct_upload_enabled', current ? '0' : '1');
+            await editMessage(chatId, msgId, `✅ قابلیت ارسال مستقیم فایل ${current ? 'غیرفعال ❌' : 'فعال ✅'} شد.`, ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
+          // ---- toggle حالت بروزرسانی ----
+          if (data === 'admin_maintenance_toggle') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const current = await getMaintenanceMode(env);
+            if (!current) {
+              await dbSetAdminState(env, chatId, { step: 'awaiting_maintenance_exception' });
+              await editMessage(chatId, msgId,
+                `🔴 <b>فعال‌سازی حالت بروزرسانی</b>\n\nچت آی دی کاربر آزمایشی (استثنا) را وارد کنید:\nبرای چند کاربر، با کاما جدا کنید: <code>123456,789012</code>\nبرای رد کردن: ارسال کنید <code>skip</code>`,
+                ADMIN_KEYBOARD, TOKEN);
+            } else {
+              await setBotSetting(env, 'maintenance_mode', '0');
+              await editMessage(chatId, msgId, "✅ حالت بروزرسانی <b>غیرفعال</b> شد.\n\nربات به حالت عادی بازگشت.", ADMIN_KEYBOARD, TOKEN);
+            }
+            return new Response('OK');
+          }
+
+          // ---- تنظیمات رفرال (ادمین) ----
+          if (data === 'admin_referral_settings') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const settings = await getReferralSettings(env);
+            const kb = { inline_keyboard: [
+              [colorBtn(settings.enabled ? "🔴 غیرفعال کردن رفرال" : "🟢 فعال کردن رفرال", "admin_referral_toggle", "blue")],
+              [colorBtn("🎯 تنظیم تیرها (Tiers) مرحله به مرحله", "admin_referral_tiers_wizard", "primary")],
+              [colorBtn(settings.referral_buy_bonus_enabled ? "🔴 غیرفعال: جایزه خرید معرفی" : "🟢 فعال: جایزه خرید معرفی", "admin_referral_buy_bonus_toggle", "blue")],
+              [colorBtn("👑 پلن جایزه خرید معرفی", "admin_referral_buy_bonus_plan", "primary")],
+              [colorBtn("📋 مشاهده تیرهای فعلی", "admin_referral_tiers_view", "blue")],
+              [colorBtn("🔙 بازگشت", "admin_panel", "danger")]
+            ]};
+            const tiersText = settings.tiers.length > 0
+              ? settings.tiers.map(t => `• ${t.count} نفر → ${t.label} (${t.reward_type === 'discount_code' ? 'کد تخفیف ۱۰۰٪' : 'اشتراک مستقیم'})`).join('\n')
+              : 'تنظیم نشده';
+            await editMessage(chatId, msgId,
+              `🔗 <b>تنظیمات سیستم رفرال</b>\n\n` +
+              `وضعیت: ${settings.enabled ? '🟢 فعال' : '🔴 غیرفعال'}\n` +
+              `جایزه خرید معرفی: ${settings.referral_buy_bonus_enabled ? '🟢 فعال' : '🔴 غیرفعال'}\n\n` +
+              `🎯 <b>تیرهای فعلی:</b>\n${tiersText}`,
+              kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_referral_toggle') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const settings = await getReferralSettings(env);
+            await setBotSetting(env, 'referral_enabled', settings.enabled ? '0' : '1');
+            await editMessage(chatId, msgId, `✅ رفرال ${settings.enabled ? 'غیرفعال' : 'فعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_referral_buy_bonus_toggle') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const settings = await getReferralSettings(env);
+            await setBotSetting(env, 'referral_buy_bonus_enabled', settings.referral_buy_bonus_enabled ? '0' : '1');
+            await editMessage(chatId, msgId, `✅ جایزه خرید معرفی ${settings.referral_buy_bonus_enabled ? 'غیرفعال' : 'فعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_referral_buy_bonus_plan') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const plans = await getAllProPlans(env);
+            if (!plans.length) { await editMessage(chatId, msgId, "❌ ابتدا باید پلن Pro بسازید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            const kb = { inline_keyboard: plans.map(p => [colorBtn(`👑 ${p.name} (${p.duration_days} روز)`, `admin_set_ref_bonus_plan:${p.id}`, "primary")]) };
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_referral_settings", "danger")]);
+            await editMessage(chatId, msgId, "👑 پلنی را که برای جایزه خرید معرفی می‌دهید انتخاب کنید:", kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_set_ref_bonus_plan:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const planId = data.split(':')[1];
+            await setBotSetting(env, 'referral_buy_bonus_plan_id', planId);
+            const plan = await getProPlanById(env, parseInt(planId));
+            await editMessage(chatId, msgId, `✅ پلن جایزه خرید معرفی روی "${plan?.name}" تنظیم شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- ویزارد تنظیم تیرهای رفرال ----
+          if (data === 'admin_referral_tiers_wizard') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const settings = await getReferralSettings(env);
+            await dbSetAdminState(env, chatId, { step: 'awaiting_referral_tier_count', tiers: settings.tiers || [], editingIndex: -1 });
+            await editMessage(chatId, msgId,
+              `🎯 <b>مدیریت تیرهای رفرال</b>\n\nتیرهای فعلی:\n${settings.tiers.length > 0 ? settings.tiers.map((t, i) => `${i + 1}. ${t.count} نفر → ${t.label}`).join('\n') : 'ندارد'}\n\n➕ برای افزودن تیر جدید:\nتعداد رفرال مورد نیاز را وارد کنید:\nمثال: <code>5</code>`,
+              { inline_keyboard: [
+                ...settings.tiers.map((t, i) => ([colorBtn(`🗑 حذف تیر ${i + 1}`, `admin_delete_ref_tier:${i}`, "danger")])),
+                [colorBtn("❌ لغو", "admin_referral_settings", "danger")]
+              ]}, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_referral_tiers_view') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const settings = await getReferralSettings(env);
+            const tiersText = settings.tiers.length > 0
+              ? settings.tiers.map((t, i) => `${i + 1}. <b>${t.count} نفر</b> → ${t.label}${t.plan_id ? ` (پلن ID: ${t.plan_id})` : ` (${t.plan_days} روز رایگان)`} [${t.reward_type === 'discount_code' ? 'کد تخفیف' : 'فعال‌سازی مستقیم'}]`).join('\n')
+              : 'هیچ تیری تنظیم نشده';
+            await editMessage(chatId, msgId,
+              `📋 <b>تیرهای رفرال فعلی:</b>\n\n${tiersText}`,
+              { inline_keyboard: [[colorBtn("🔙 بازگشت", "admin_referral_settings", "danger")]] }, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_delete_ref_tier:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const idx = parseInt(data.split(':')[1]);
+            const settings = await getReferralSettings(env);
+            const tiers = [...settings.tiers];
+            if (idx >= 0 && idx < tiers.length) {
+              const removed = tiers.splice(idx, 1)[0];
+              await setBotSetting(env, 'referral_tiers', JSON.stringify(tiers));
+              await sendMessage(chatId, `✅ تیر "${removed.count} نفر → ${removed.label}" حذف شد.`, ADMIN_KEYBOARD, TOKEN);
+            }
+            return new Response('OK');
+          }
+
+          // ---- آمار رفرال (ادمین) + نام و صفحه‌بندی ----
+          if (data === 'admin_referral_stats' || data.startsWith('admin_referral_stats_page:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const page = data.startsWith('admin_referral_stats_page:') ? parseInt(data.split(':')[1]) : 1;
+            const perPage = 10;
+            const topReferrers = await env.DB.prepare(
+              'SELECT r.referrer_chat_id, COUNT(*) as cnt, u.name FROM referrals r LEFT JOIN users u ON r.referrer_chat_id = u.chat_id WHERE r.valid = 1 GROUP BY r.referrer_chat_id ORDER BY cnt DESC LIMIT ? OFFSET ?'
+            ).bind(perPage, (page - 1) * perPage).all();
+            
+            const total = (await env.DB.prepare('SELECT COUNT(DISTINCT referrer_chat_id) as c FROM referrals WHERE valid = 1').first())?.c || 0;
+            const totalPages = Math.ceil(total / perPage);
+
+            let msg = `📈 <b>آمار رفرال‌ها (صفحه ${page} از ${totalPages})</b>\n\n`;
+            msg += `👥 کل معرف‌ها: ${total}\n\n`;
+            msg += `🏆 <b>برترین معرف‌ها:</b>\n`;
+            
+            const kb = { inline_keyboard: [] };
+            for (const r of (topReferrers.results || [])) {
+              const uName = r.name || 'کاربر';
+              msg += `👤 <code>${r.referrer_chat_id}</code> (${uName}) — ${r.cnt} رفرال\n`;
+              kb.inline_keyboard.push([colorBtn(`📊 جزئیات ${uName} (${r.cnt})`, `admin_referral_user:${r.referrer_chat_id}`, "primary")]);
+            }
+            
+            const navRow = [];
+            if (page > 1) navRow.push(colorBtn("◀️ قبلی", `admin_referral_stats_page:${page - 1}`, "blue"));
+            if (page < totalPages) navRow.push(colorBtn("▶️ بعدی", `admin_referral_stats_page:${page + 1}`, "blue"));
+            if (navRow.length > 0) kb.inline_keyboard.push(navRow);
+            
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "danger")]);
+            await editMessage(chatId, msgId, msg, kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_referral_user:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const targetId = data.split(':')[1];
+            // برای جزئیات هم نام کاربران جدید رو درمیاریم
+            const refs = await env.DB.prepare('SELECT r.new_user_chat_id, r.created_at, u.name FROM referrals r LEFT JOIN users u ON r.new_user_chat_id = u.chat_id WHERE r.referrer_chat_id = ? AND r.valid = 1 ORDER BY r.created_at DESC LIMIT 20').bind(targetId).all();
+            const count = refs.results?.length || 0;
+            let msg = `📊 <b>رفرال‌های کاربر <code>${targetId}</code></b>\n\nتعداد کل: ${count} (نمایش ۲۰ رفرال اخیر)\n\n`;
+            for (const r of (refs.results || [])) {
+              msg += `• <code>${r.new_user_chat_id}</code> (${r.name || 'کاربر'}) — ${new Date(r.created_at).toLocaleDateString('fa-IR')}\n`;
+            }
+            await editMessage(chatId, msgId, msg, { inline_keyboard: [[colorBtn("🔙 بازگشت", "admin_referral_stats", "danger")]] }, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- مدیریت کدهای تخفیف (ادمین) ----
+          if (data === 'admin_coupon_menu') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const coupons = await env.DB.prepare('SELECT * FROM coupons WHERE active = 1 ORDER BY created_at DESC LIMIT 10').all();
+            let msg = `🎟 <b>مدیریت کدهای تخفیف</b>\n\n`;
+            const kb = { inline_keyboard: [] };
+            if (!coupons.results || coupons.results.length === 0) {
+              msg += 'هیچ کد تخفیف فعالی وجود ندارد.\n';
+            } else {
+              for (const c of coupons.results) {
+                const nowSec = Math.floor(Date.now() / 1000);
+                const expired = c.expires_at && c.expires_at < nowSec;
+                const full = c.max_uses && c.used_count >= c.max_uses;
+                msg += `${expired || full ? '❌' : '✅'} <b>${c.code}</b> — ${c.discount_percent}٪\n`;
+                msg += `   استفاده: ${c.used_count}${c.max_uses ? `/${c.max_uses}` : ''} | انقضا: ${c.expires_at ? new Date(c.expires_at * 1000).toLocaleDateString('fa-IR') : 'ندارد'}\n`;
+                kb.inline_keyboard.push([colorBtn(`🗑 حذف ${c.code}`, `admin_delete_coupon:${c.code}`, "danger")]);
+              }
+            }
+            kb.inline_keyboard.push([colorBtn("➕ ایجاد کد تخفیف", "admin_create_coupon", "success")]);
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "primary")]);
+            await editMessage(chatId, msgId, msg, kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_create_coupon') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbDeleteAdminState(env, chatId);
+            await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_code_admin' });
+            await editMessage(chatId, msgId, `➕ <b>ایجاد کد تخفیف</b>\n\nکد تخفیف را وارد کنید (حروف انگلیسی بزرگ و اعداد):\nمثال: <code>SUMMER2025</code>`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_delete_coupon:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const code = data.split(':')[1];
+            await env.DB.prepare('UPDATE coupons SET active = 0 WHERE code = ?').bind(code).run();
+            await editMessage(chatId, msgId, `✅ کد تخفیف "${code}" غیرفعال شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- اعضای Pro (با صفحه‌بندی و نام) ----
+          if (data === 'admin_pro_members' || data.startsWith('admin_pro_members_page:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const page = data.startsWith('admin_pro_members_page:') ? parseInt(data.split(':')[1]) : 1;
+            const perPage = 10;
+            const offset = (page - 1) * perPage;
+            const nowSec = Math.floor(Date.now() / 1000);
+            
+            // JOIN با جدول users برای گرفتن اسم
+            const proMembers = await env.DB.prepare('SELECT pu.chat_id, pu.expires_at, pu.plan_snapshot, u.name FROM pro_users pu LEFT JOIN users u ON pu.chat_id = u.chat_id WHERE pu.expires_at > ? ORDER BY pu.expires_at ASC LIMIT ? OFFSET ?').bind(nowSec, perPage, offset).all();
+            const totalPro = (await env.DB.prepare('SELECT COUNT(*) as c FROM pro_users WHERE expires_at > ?').bind(nowSec).first())?.c || 0;
+            const totalPages = Math.ceil(totalPro / perPage);
+
+            if (!proMembers.results || proMembers.results.length === 0) {
+              await editMessage(chatId, msgId, "ℹ️ هیچ عضو Pro فعالی وجود ندارد.", ADMIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
+            let msg = `👥 <b>اعضای Pro فعال (صفحه ${page} از ${totalPages}):</b>\n\n`;
+            const kb = { inline_keyboard: [] };
+            for (const m of proMembers.results) {
+              let planName = 'استاندارد';
+              const uName = m.name || 'کاربر';
+              try { if (m.plan_snapshot) { const ps = JSON.parse(m.plan_snapshot); planName = ps.name || 'استاندارد'; } } catch {}
+              const hoursLeft = Math.round((m.expires_at - nowSec) / 3600);
+              const timeText = hoursLeft > 24 ? `${Math.floor(hoursLeft / 24)} روز` : `${hoursLeft} ساعت`;
+              
+              msg += `👤 <code>${m.chat_id}</code> (${uName}) | ${planName} | ⏳ ${timeText}\n`;
+              kb.inline_keyboard.push([colorBtn(`📩 پیام به ${uName}`, `admin_msg_pro:${m.chat_id}`, "primary")]);
+            }
+            const navRow = [];
+            if (page > 1) navRow.push(colorBtn("◀️ قبلی", `admin_pro_members_page:${page - 1}`, "blue"));
+            if (page < totalPages) navRow.push(colorBtn("▶️ بعدی", `admin_pro_members_page:${page + 1}`, "blue"));
+            if (navRow.length > 0) kb.inline_keyboard.push(navRow);
+            if (totalPro > perPage) msg += `\n📊 کل: ${totalPro} عضو Pro`;
+            
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "danger")]);
+            await editMessage(chatId, msgId, msg, kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_msg_pro:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const targetId = data.split(':')[1];
+            await dbSetAdminState(env, chatId, { step: 'awaiting_direct_message_text', targetChatId: targetId });
+            await editMessage(chatId, msgId, `📩 <b>ارسال پیام به کاربر Pro: ${targetId}</b>\n\nمتن پیام را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- تخفیف تمدید ----
+          if (data === 'admin_renewal_discount') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const currentDiscount = await getRenewalDiscountPercent(env);
+            const currentHours = await getRenewalNotifyHours(env);
+            await dbSetAdminState(env, chatId, { step: 'awaiting_renewal_discount_percent' });
+            await editMessage(chatId, msgId,
+              `🔔 <b>تنظیم تخفیف تمدید Pro</b>\n\n📊 تخفیف فعلی: ${currentDiscount > 0 ? currentDiscount + '٪' : 'غیرفعال'}\n⏰ نوتیف فعلی: ${currentHours} ساعت قبل از انقضا\n\nدرصد تخفیف برای تمدید را وارد کنید (مثال: <code>20</code>):\nبرای غیرفعال کردن تخفیف: <code>0</code>`,
+              ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- ارسال مستقیم پیام ----
+          if (data === 'admin_direct_message') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbSetAdminState(env, chatId, { step: 'awaiting_direct_chat_id' });
+            await editMessage(chatId, msgId, "📩 <b>ارسال مستقیم پیام</b>\n\nچت آی دی گیرنده را ارسال کنید:", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- تنظیم قیمت‌ها ----
+          if (data === 'admin_set_prices') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const starsP = await getEffectiveStarsPrice(env);
+            const usdP = await getEffectiveUsdPrice(env);
+            await dbSetAdminState(env, chatId, { step: 'awaiting_stars_price' });
+            await editMessage(chatId, msgId,
+              `💰 <b>تنظیم قیمت پایه (بدون تخفیف)</b>\n\nقیمت فعلی Stars: ${starsP}\nقیمت فعلی دلار: ${usdP}$\n\nقیمت جدید Stars را وارد کنید (عدد صحیح):`,
+              ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- تنظیم محدودیت‌ها ----
+          if (data === 'admin_set_limits') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const normalSizeMB = await getNormalFileSizeLimitMB(env);
+            const proSizeMB = await getProFileSizeLimitMB(env);
+            const normalTTL = await getNormalMaxTimeSec(env);
+            const proTTL = await getProMaxTimeSec(env);
+            const normalDailyFiles = await getNormalDailyFiles(env);
+            const normalDailyDirect = await getNormalDailyDirectFiles(env);
+            const normalVolMB = await getNormalDailyVolumeMB(env);
+            await dbSetAdminState(env, chatId, { step: 'awaiting_normal_daily_files' });
+            await editMessage(chatId, msgId,
+              `📦 <b>تنظیم محدودیت‌های ربات</b>\n\n` +
+              `📁 فایل روزانه عادی فعلی: <b>${normalDailyFiles}</b>\n` +
+              `🚀 ارسال مستقیم عادی فعلی: <b>${normalDailyDirect}</b>\n` +
+              `📊 حجم روزانه عادی فعلی: <b>${normalVolMB} مگابایت</b>\n` +
+              `📏 حجم هر فایل عادی فعلی: <b>${normalSizeMB} مگابایت</b>\n` +
+              `⏱ ماندگاری عادی فعلی: <b>${Math.round(normalTTL / 3600)} ساعت</b>\n` +
+              `📏 حجم هر فایل Pro (پیش‌فرض) فعلی: <b>${proSizeMB} مگابایت</b>\n` +
+              `⏱ ماندگاری Pro (پیش‌فرض) فعلی: <b>${Math.round(proTTL / 86400)} روز</b>\n\n` +
+              `مرحله ۱ از ۷: تعداد کل فایل روزانه برای کاربران عادی را وارد کنید:`,
+              ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- مدیریت پلن‌ها ----
+          if (data === 'admin_plans_menu') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const plans = await getAllProPlans(env);
+            let msg = `👑 <b>مدیریت پلن‌های Pro</b>\n\n`;
+            const kb = { inline_keyboard: [] };
+            if (plans.length === 0) {
+              msg += `هیچ پلنی تعریف نشده است.\n`;
+            } else {
+              for (const p of plans) {
+                const maxFileMB = p.max_file_size_mb || 2048;
+                msg += `${p.is_active ? '✅' : '❌'} <b>${p.name}</b>\n   ${p.duration_days} روز | ${p.daily_files} فایل (${p.daily_direct_files} مستقیم)/روز | ${p.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n   Stars: ${p.stars_price} | 💵 ${p.usd_price}$\n\n`;
+                kb.inline_keyboard.push([
+                  colorBtn(`✏️ ویرایش ${p.name}`, `admin_edit_plan:${p.id}`, "primary"),
+                  colorBtn(p.is_active ? '🔴 غیرفعال' : '🟢 فعال', `admin_toggle_plan:${p.id}`, "blue"),
+                  colorBtn('🗑', `admin_delete_plan:${p.id}`, "danger")
+                ]);
+              }
+            }
+            kb.inline_keyboard.push([colorBtn("➕ افزودن پلن جدید", "admin_add_plan", "success")]);
+            kb.inline_keyboard.push([colorBtn("🎁 تنظیم تخفیف پلن‌ها", "admin_plan_discounts", "primary")]);
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "danger")]);
+            await editMessage(chatId, msgId, msg, kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_add_plan') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbDeleteAdminState(env, chatId);
+            await dbSetAdminState(env, chatId, { step: 'awaiting_plan_name' });
+            await editMessage(chatId, msgId, "➕ <b>افزودن پلن جدید Pro</b>\n\nمرحله ۱ از ۸: نام پلن را ارسال کنید:\nمثال: <code>ماهانه ویژه</code>", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_edit_plan:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const planId = parseInt(data.split(':')[1]);
+            const plan = await getProPlanById(env, planId);
+            if (!plan) { await editMessage(chatId, msgId, "❌ پلن یافت نشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_name', planId });
+            await editMessage(chatId, msgId,
+              `✏️ <b>ویرایش پلن: ${plan.name}</b>\n\nمرحله ۱ از ۸: نام جدید پلن را ارسال کنید:\n(یا <code>-</code> برای نگه‌داشتن "<b>${plan.name}</b>")`,
+              ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_toggle_plan:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const planId = parseInt(data.split(':')[1]);
+            const plan = await getProPlanById(env, planId);
+            if (!plan) { await editMessage(chatId, msgId, "❌ پلن یافت نشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            const newStatus = plan.is_active ? 0 : 1;
+            await env.DB.prepare('UPDATE pro_plans SET is_active = ? WHERE id = ?').bind(newStatus, planId).run();
+            await editMessage(chatId, msgId, `✅ پلن "${plan.name}" ${newStatus ? 'فعال' : 'غیرفعال'} شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_delete_plan:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const planId = parseInt(data.split(':')[1]);
+            const plan = await getProPlanById(env, planId);
+            if (!plan) { await editMessage(chatId, msgId, "❌ پلن یافت نشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            await env.DB.prepare('DELETE FROM pro_plans WHERE id = ?').bind(planId).run();
+            await editMessage(chatId, msgId, `✅ پلن "${plan.name}" حذف شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- تخفیف پلن‌ها ----
+          if (data === 'admin_plan_discounts') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const plans = await getAllProPlans(env);
+            if (plans.length === 0) { await editMessage(chatId, msgId, "❌ هیچ پلنی ثبت نشده. ابتدا پلن بسازید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            const kb = { inline_keyboard: [] };
+            for (const p of plans) {
+              const disc = await getPlanDiscountForPlan(env, p.id);
+              const discText = disc ? ` 🎉${disc.discount_percent}٪` : '';
+              kb.inline_keyboard.push([colorBtn(`🎁 ${p.name}${discText}`, `admin_set_plan_discount:${p.id}`, "primary")]);
+            }
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_plans_menu", "danger")]);
+            await editMessage(chatId, msgId, "🎁 <b>تنظیم تخفیف برای پلن‌ها</b>\n\nپلن مورد نظر را انتخاب کنید:", kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_set_plan_discount:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const planId = parseInt(data.split(':')[1]);
+            const plan = await getProPlanById(env, planId);
+            if (!plan) { await editMessage(chatId, msgId, "❌ پلن یافت نشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            await dbSetAdminState(env, chatId, { step: 'awaiting_plan_discount_percent', planId, planName: plan.name });
+            await editMessage(chatId, msgId,
+              `🎁 <b>تخفیف برای پلن: ${plan.name}</b>\n\nدرصد تخفیف را وارد کنید (مثال: <code>20</code> برای ۲۰٪):\nبرای لغو تخفیف فعلی: <code>0</code>`,
+              ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- منوی تخفیف ----
+          if (data === 'admin_discount_menu') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const discount = await getDiscountSettings(env);
+            let msg = `🎁 <b>مدیریت تخفیف</b>\n\n`;
+            if (discount) {
+              const tl = Math.max(0, Math.round((discount.expiresAt - Math.floor(Date.now() / 1000)) / 60));
+              msg += `✅ تخفیف سراسری فعال است\n Stars: ${discount.starsPrice} | 💵 ${discount.usdPrice}$\n⏳ ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'} باقیمانده\n\n`;
+            } else {
+              msg += `❌ تخفیف سراسری فعال نیست\n\n`;
+            }
+            const kb = { inline_keyboard: [
+              [colorBtn("🎁 تنظیم تخفیف سراسری", "admin_set_discount", "success")],
+              [colorBtn("❌ لغو تخفیف سراسری", "admin_clear_discount", "danger")],
+              [colorBtn("👑 تخفیف پلن‌های Pro", "admin_plan_discounts", "primary")],
+              [colorBtn("🔙 بازگشت", "admin_panel", "blue")]
+            ]};
+            await editMessage(chatId, msgId, msg, kb, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- وضعیت ارسال ----
+          if (data === 'admin_broadcast_status') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const p = await dbGetBroadcastState(env, ADMIN_CHAT_ID);
+            if (!p) { await editMessage(chatId, msgId, "ℹ️ هیچ ارسالی انجام نشده.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            const st = p.status === 'running' ? '🔄 در حال ارسال' : p.status === 'cancelled' ? '⛔ لغو شده' : '✅ تکمیل شده';
+            const el = Math.round((Date.now() - (p.startTime || Date.now())) / 1000);
+            await editMessage(chatId, msgId, `📊 <b>وضعیت آخرین ارسال</b>\n\n${st}\n👥 کل: ${p.total}\n✅ موفق: ${p.sent} | ❌ ناموفق: ${p.fail}\n📈 ${Math.round((p.sent || 0) / Math.max(p.total, 1) * 100)}٪\n⏱️ ${Math.floor(el / 60)}:${String(el % 60).padStart(2, '0')}`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- ریست صف ----
+          if (data === 'admin_reset_queue') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await env.DB.prepare('DELETE FROM queue').run();
+            await editMessage(chatId, msgId, "✅ صف خالی شد.", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- شروع صف ----
+          if (data === 'admin_start_queue') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await finishTask(env);
+            await editMessage(chatId, msgId, "✅ صف راه‌اندازی شد.", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- ریست پردازش‌ها ----
+          if (data === 'admin_fix_active') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const cnt = (await env.DB.prepare('SELECT COUNT(*) as c FROM user_state WHERE status = ?').bind('processing').first())?.c || 0;
+            await env.DB.prepare('UPDATE user_state SET status = ? WHERE status = ?').bind('cancelled', 'processing').run();
+            await finishTask(env);
+            await editMessage(chatId, msgId, `✅ ${cnt} پردازش لغو شد.`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- ارتقا به Pro ----
+          if (data === 'admin_promote') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const plans = await getAllProPlans(env);
+            const kb = { inline_keyboard: [] };
+            for (const p of plans) {
+              kb.inline_keyboard.push([colorBtn(`👑 ${p.name} (${p.duration_days} روز)`, `admin_promote_plan:${p.id}`, "primary")]);
+            }
+            kb.inline_keyboard.push([colorBtn("📦 پلن پیش‌فرض ۳۰ روزه", "admin_promote_plan:default", "primary")]);
+            kb.inline_keyboard.push([colorBtn("🔙 بازگشت", "admin_panel", "danger")]);
+            await editMessage(chatId, msgId, "🔹 <b>ارتقا به Pro</b>\n\nابتدا پلن مورد نظر را انتخاب کنید:", kb, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_promote_plan:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const planIdStr = data.split(':')[1];
+            const selectedPlanId = planIdStr === 'default' ? null : parseInt(planIdStr);
+            let planName = 'پیش‌فرض ۳۰ روزه';
+            if (selectedPlanId) {
+              const plan = await getProPlanById(env, selectedPlanId);
+              planName = plan ? plan.name : 'نامعلوم';
+            }
+            await dbSetAdminState(env, chatId, { step: 'awaiting_promote_userid', selectedPlanId, planName });
+            await editMessage(chatId, msgId, `🔹 <b>ارتقا به Pro - پلن: ${planName}</b>\n\nشناسه عددی کاربر (Chat ID) را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_reset_quota') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbSetAdminState(env, chatId, { step: 'awaiting_quota_userid' });
+            await editMessage(chatId, msgId, "🔹 <b>ریست سهمیه</b>\n\nشناسه عددی کاربر (Chat ID) را ارسال کنید:", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_set_channel') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbSetAdminState(env, chatId, { step: 'awaiting_add_channel' });
+            await editMessage(chatId, msgId, "🔹 <b>افزودن کانال اجباری</b>\n\nنام کاربری کانال را ارسال کنید (بدون @):\nمثال: <code>maramidownload</code>", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_show_channels') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await adminShowChannels(env, chatId, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_broadcast') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbSetAdminState(env, chatId, { step: 'awaiting_broadcast_message' });
+            await editMessage(chatId, msgId, "📨 <b>ارسال پیام همگانی</b>\n\nمتن پیام را ارسال کنید.\n(HTML پشتیبانی می‌شود)\n\nبرای لغو: /cancel\nبرای لغو در حین ارسال: /cancel_broadcast", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_set_discount') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await dbSetAdminState(env, chatId, { step: 'awaiting_discount_duration' });
+            await editMessage(chatId, msgId, "🎁 <b>تنظیم تخفیف سراسری</b>\n\nمرحله ۱ از ۳: مدت اعتبار تخفیف را به ساعت وارد کنید:\nمثال: <code>24</code>", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_clear_discount') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await clearDiscount(env);
+            await editMessage(chatId, msgId, "✅ تخفیف سراسری لغو شد.", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data.startsWith('admin_remove_channel:')) {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            const ch = data.split(':')[1];
+            const channels = await getRequiredChannels(env);
+            if (!channels.includes(ch)) { await sendMessage(chatId, `⚠️ @${ch} در لیست نیست.`, ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            await setRequiredChannels(env, channels.filter(c => c !== ch));
+            await sendMessage(chatId, `✅ کانال @${ch} حذف شد.`, ADMIN_KEYBOARD, TOKEN);
+            await adminShowChannels(env, chatId, TOKEN);
+            return new Response('OK');
+          }
+
+          if (data === 'admin_remove_all_channels') {
+            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+            await setRequiredChannels(env, []);
+            await editMessage(chatId, msgId, "✅ همه کانال‌ها حذف شدند.", ADMIN_KEYBOARD, TOKEN);
+            return new Response('OK');
+          }
+
+          // ---- خرید پلن با Stars ----
           if (data.startsWith('buy_plan_stars:')) {
             const planId = parseInt(data.split(':')[1]);
             const plan = await getProPlanById(env, planId);
-            if (!plan || !plan.is_active) { await editMessage(chatId, msgId, "❌ این پلن در دسترس نیست.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            if (!plan || !plan.is_active) {
+              await editMessage(chatId, msgId, "❌ این پلن در دسترس نیست.", MAIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
             const planDiscount = await getPlanDiscountForPlan(env, planId);
             const starsPrice = planDiscount ? Math.round(plan.stars_price * (1 - planDiscount.discount_percent / 100)) : plan.stars_price;
             const maxFileMB = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
             const si = await createStarsInvoiceLink(env, chatId, starsPrice, planId);
             if (!si.success) { await editMessage(chatId, msgId, "❌ خطا در ایجاد لینک پرداخت.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
             const kb = { inline_keyboard: [[colorBtn(`⭐️ پرداخت ${starsPrice} Stars`, si.invoiceLink, "primary")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
-            await editMessage(chatId, msgId, `⭐️ <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل کل/روز (${plan.daily_direct_files} مستقیم)\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${starsPrice} Stars</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
+            await editMessage(chatId, msgId, `⭐️ <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${starsPrice} Stars</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
             return new Response('OK');
           }
 
+          // ---- خرید پلن با دلار ----
           if (data.startsWith('buy_plan_usd:')) {
             const planId = parseInt(data.split(':')[1]);
             const plan = await getProPlanById(env, planId);
@@ -1384,12 +2574,17 @@ export default {
             const ci = await createNowPaymentsInvoice(env, chatId, usdPrice, planId);
             if (!ci.success) { await editMessage(chatId, msgId, "❌ خطا در ایجاد لینک پرداخت.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
             const kb = { inline_keyboard: [[colorBtn(`💰 پرداخت ${usdPrice}$`, ci.invoiceUrl, "success")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
-            await editMessage(chatId, msgId, `💰 <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل کل/روز (${plan.daily_direct_files} مستقیم)\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💵 قیمت: <b>${usdPrice}$</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
+            await editMessage(chatId, msgId, `💰 <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💵 قیمت: <b>${usdPrice}$</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
             return new Response('OK');
           }
 
-          if (data === 'pro_info') { await showProPlansToUser(env, chatId, msgId, TOKEN); return new Response('OK'); }
+          // ---- Pro info ----
+          if (data === 'pro_info') {
+            await showProPlansToUser(env, chatId, msgId, TOKEN);
+            return new Response('OK');
+          }
 
+          // ---- تخفیف ویژه ----
           if (data === 'discount_pro') {
             const isPro = await isProUser(env, chatId);
             if (isPro) { await editMessage(chatId, msgId, "✅ شما از قبل Pro هستید.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
@@ -1406,11 +2601,13 @@ export default {
             const baseStars = await getEffectiveStarsPrice(env);
             const baseUsd = await getEffectiveUsdPrice(env);
             const normalDailyFiles = await getNormalDailyFiles(env);
+            const normalDailyDirect = await getNormalDailyDirectFiles(env);
             const normalVolMB = await getNormalDailyVolumeMB(env);
-            await editMessage(chatId, msgId, `🎁 <b>اشتراک Pro با تخفیف ویژه</b>\n⏰ باقیمانده: ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'}\n\n<s>${baseStars} Stars | ${baseUsd}$</s>\n<b>${discount.starsPrice} Stars | ${discount.usdPrice}$</b>\n\n✨ نگهداری ۱ روز | اولویت صف | ${DAILY_LIMIT_PRO} فایل در روز\n\nکاربران عادی: ${normalDailyFiles} فایل و ${normalVolMB} مگابایت در روز`, { inline_keyboard: rows }, TOKEN);
+            await editMessage(chatId, msgId, `🎁 <b>اشتراک Pro با تخفیف ویژه</b>\n⏰ باقیمانده: ${tl > 60 ? Math.floor(tl / 60) + ' ساعت' : tl + ' دقیقه'}\n\n<s>${baseStars} Stars | ${baseUsd}$</s>\n<b>${discount.starsPrice} Stars | ${discount.usdPrice}$</b>\n\n✨ نگهداری ۱ روز | اولویت صف | ${DAILY_LIMIT_PRO} فایل (۳ مستقیم) در روز\n\nکاربران عادی: ${normalDailyFiles} فایل (${normalDailyDirect} مستقیم) و ${normalVolMB} مگابایت در روز`, { inline_keyboard: rows }, TOKEN);
             return new Response('OK');
           }
 
+          // ---- راهنما ----
           if (data === 'help') {
             const baseStars = await getEffectiveStarsPrice(env);
             const baseUsd = await getEffectiveUsdPrice(env);
@@ -1427,16 +2624,18 @@ export default {
               `📘 <b>راهنمای کامل ربات دانلودر ملی</b>\n\n` +
               `🌀 به ربات دانلودر خوش آمدید! این ربات به شما کمک می‌کند فایل‌های خود را با <b>اینترنت ملی ایران</b> و بدون نیاز به VPN دانلود کنید.\n\n` +
               `🔹 <b>نحوه استفاده:</b>\n` +
-              `1️⃣ <b>ارسال مستقیم فایل (جدید):</b> فایل خود را مستقیم در همین ربات ارسال کنید (حداکثر ۲ گیگابایت). <i>[با توجه به سهمیه فایل مستقیم شما]</i>\n` +
-              `2️⃣ <b>دریافت با لینک:</b> یا برای فایل‌های بزرگتر، فایل خود را به ربات واسطه <b>@filesto_bot</b> فوروارد کنید و لینک مستقیم را اینجا ارسال کنید.\n` +
+              `1️⃣ <b>دریافت لینک مستقیم:</b> فایل خود را به ربات <b>@filesto_bot</b> فوروارد کنید. آن ربات یک لینک مستقیم به شما می‌دهد.\n` +
+              `2️⃣ <b>ارسال لینک:</b> لینک مستقیم را در همین ربات ارسال کنید.\n` +
+              `✨ <b>جدید:</b> قابلیت ارسال مستقیم فایل به ربات اضافه شد! می‌توانید فایل را مستقیم (بدون نیاز به لینک) با سهمیه مشخص روزانه اینجا بفرستید.\n` +
               `3️⃣ <b>رمز عبور:</b> یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
               `4️⃣ <b>دریافت لینک دانلود:</b> منتظر بمانید تا پردازش شود و لینک دانلود (با قابلیت دانلود با اینترنت ملی) را دریافت کنید.\n` +
               `5️⃣ <b>پس از دانلود:</b> حتماً روی دکمه «🗑 حذف فایل من» کلیک کنید تا فایل از سرور پاک شود.\n\n` +
               `⭐️ <b>عضویت Pro (ویژه)</b>\n` +
               `• فایل‌های شما تا <b>${proTTLText}</b> روی سرور می‌ماند (کاربران عادی: ${normalTTLText})\n` +
               `• اولویت بالاتر در صف پردازش\n` +
-              `• حداکثر <b>${DAILY_LIMIT_PRO} فایل کل</b> (${DAILY_DIRECT_LIMIT_PRO} مستقیم) در روز و حداکثر حجم هر فایل <b>${proSizeMB} مگابایت</b>.\n` +
+              `• حداکثر <b>${DAILY_LIMIT_PRO} فایل کل</b> و <b>سهمیه اختصاصی ارسال مستقیم</b> در روز (عادی: ${normalDailyFiles} فایل کل)\n` +
               `• حداکثر <b>${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز (عادی: ${normalVolMB} مگابایت)\n` +
+              `• حداکثر حجم هر فایل: <b>${proSizeMB} مگابایت</b> (عادی: ${normalSizeMB} مگابایت)\n` +
               `• هزینه عضویت: ${baseStars} Stars تلگرام یا ${baseUsd} دلار ارز دیجیتال\n` +
               `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
               `🎁 <b>اشتراک رایگان Pro با دعوت دوستان</b>\n` +
@@ -1454,8 +2653,8 @@ export default {
               `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b>\n` +
               `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران می‌شوید.\n\n` +
               `📊 <b>محدودیت‌های فعلی:</b>\n` +
-              `• کاربران عادی: <b>${normalDailyFiles} فایل کل</b> (${normalDailyDirect} مستقیم) و <b>${normalVolMB} مگابایت</b> در روز | حداکثر ${normalSizeMB} مگابایت/فایل | ماندگاری ${normalTTLText}\n` +
-              `• کاربران Pro: <b>${DAILY_LIMIT_PRO} فایل کل</b> (${DAILY_DIRECT_LIMIT_PRO} مستقیم) و <b>${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز | حداکثر ${proSizeMB} مگابایت/فایل | ماندگاری ${proTTLText}\n\n` +
+              `• کاربران عادی: <b>${normalDailyFiles} فایل کل (مستقیم: ${normalDailyDirect})</b> و <b>${normalVolMB} مگابایت</b> در روز | حداکثر ${normalSizeMB} مگابایت/فایل | ماندگاری ${normalTTLText}\n` +
+              `• کاربران Pro: <b>${DAILY_LIMIT_PRO} فایل کل</b> و <b>${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز | حداکثر ${proSizeMB} مگابایت/فایل | ماندگاری ${proTTLText}\n\n` +
               `❤️ <b>حمایت و پشتیبانی:</b>\n` +
               `• کانال تلگرام: @maramidownload\n` +
               `• برای گزارش مشکلات، در کانال پیام بگذارید.\n\n` +
@@ -1464,6 +2663,7 @@ export default {
             return new Response('OK');
           }
 
+          // ---- آمار ----
           if (data === 'stats') {
             try {
               const stats = await dbGetGlobalStats(env);
@@ -1474,11 +2674,14 @@ export default {
               const normalDailyFiles = await getNormalDailyFiles(env);
               const normalDailyDirect = await getNormalDailyDirectFiles(env);
               const normalVolMB = await getNormalDailyVolumeMB(env);
-              await editMessage(chatId, msgId, `📊 <b>آمار لحظه‌ای</b>\n\n👥 کل کاربران: ${users}\n🔄 در پردازش: ${active}\n⏳ در صف: ${queue} (${proQueue} Pro)\n🔗 لینک‌های ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} GB\n\n📊 <b>محدودیت‌های عادی:</b>\n${normalDailyFiles} فایل کل و ${normalDailyDirect} مستقیم | ${normalVolMB} MB روزانه\n\n📢 @maramidownload`, MAIN_KEYBOARD, TOKEN);
+              await editMessage(chatId, msgId,
+                `📊 <b>آمار لحظه‌ای</b>\n\n👥 کل کاربران: ${users}\n🔄 در پردازش: ${active}\n⏳ در صف: ${queue} (${proQueue} Pro)\n🔗 لینک‌های ساخته شده: ${stats.total_links}\n💾 حجم کل دانلود شده: ${stats.total_volume_gb.toFixed(2)} GB\n\n📊 <b>محدودیت‌های کاربران عادی:</b>\n${normalDailyFiles} فایل کل (مستقیم: ${normalDailyDirect}) و ${normalVolMB} مگابایت در روز\n\n📢 @maramidownload`,
+                MAIN_KEYBOARD, TOKEN);
             } catch (e) { await editMessage(chatId, msgId, "⚠️ خطا.", MAIN_KEYBOARD, TOKEN); }
             return new Response('OK');
           }
 
+          // ---- وضعیت من ----
           if (data === 'status') {
             try {
               const isPro = await isProUser(env, chatId);
@@ -1492,7 +2695,7 @@ export default {
                 const proRow = await env.DB.prepare('SELECT expires_at FROM pro_users WHERE chat_id = ? AND expires_at > ?').bind(chatId, Math.floor(Date.now() / 1000)).first();
                 const hoursLeft = proRow ? Math.round((proRow.expires_at - Math.floor(Date.now() / 1000)) / 3600) : 0;
                 const timeLeftText = hoursLeft > 24 ? `${Math.floor(hoursLeft / 24)} روز و ${hoursLeft % 24} ساعت` : `${hoursLeft} ساعت`;
-                proInfo = `\n\n⭐️ <b>اشتراک Pro فعال</b>\n📦 پلن: ${planInfo.name || 'استاندارد'}\n📅 انقضا: ${proRow ? new Date(proRow.expires_at * 1000).toLocaleDateString('fa-IR') : '-'} (${timeLeftText} دیگر)\n📁 ${planInfo.daily_files || DAILY_LIMIT_PRO} کل / ${planInfo.daily_direct_files || DAILY_DIRECT_LIMIT_PRO} مستقیم روزانه\n💾 ${planInfo.daily_volume_gb ? planInfo.daily_volume_gb * 1024 : DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت در روز\n📏 حداکثر هر فایل: ${planInfo.max_file_size_mb || 2048} مگابایت`;
+                proInfo = `\n\n⭐️ <b>اشتراک Pro فعال</b>\n📦 پلن: ${planInfo.name || 'استاندارد'}\n📅 انقضا: ${proRow ? new Date(proRow.expires_at * 1000).toLocaleDateString('fa-IR') : '-'} (${timeLeftText} دیگر)\n📁 ${planInfo.daily_files || DAILY_LIMIT_PRO} فایل/روز | 🚀 ${planInfo.daily_direct_files !== undefined ? planInfo.daily_direct_files : 3} آپلود مستقیم | 💾 ${planInfo.daily_volume_gb ? planInfo.daily_volume_gb * 1024 : DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت/روز\n📏 حداکثر هر فایل: ${planInfo.max_file_size_mb || 2048} مگابایت`;
               } else if (!isPro) {
                 proInfo = `\n\n❌ <b>اشتراک Pro</b>: فعال نیست`;
               }
@@ -1501,7 +2704,7 @@ export default {
               const lb = await dbGetLastBranch(env, chatId);
               if (lb) {
                 const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${lb}.zip`;
-                await editMessage(chatId, msgId, `✅ <b>فایل آماده است!</b>\n\n🔗 ${link}\n\n${qt}${proInfo}${st}`, { inline_keyboard: [[colorBtn("🗑 حذف فایل", "delete_my_file", "danger")], [colorBtn("📥 دریافت فایل جدید", "new_link_check", "primary")]] }, TOKEN);
+                await editMessage(chatId, msgId, `✅ <b>فایل آماده است!</b>\n\n🔗 ${link}\n\n${qt}${proInfo}${st}`, { inline_keyboard: [[colorBtn("🗑 حذف فایل", "delete_my_file", "danger")], [colorBtn("📥 لینک جدید", "new_link_check", "primary")]] }, TOKEN);
                 return new Response('OK');
               }
 
@@ -1512,7 +2715,7 @@ export default {
                   const nowSec = Math.floor(Date.now() / 1000);
                   const createdAt = Math.floor((overPend.created_at || 0) / 1000);
                   const minutesLeft = Math.round(OVERSIZED_PENDING_HOURS * 60 - (nowSec - createdAt) / 60);
-                  await editMessage(chatId, msgId, `⏰ <b>فایل شما در انتظار خرید Pro است!</b>\n\n⏳ زمان باقیمانده: ${Math.max(0, minutesLeft)} دقیقه\n\n${qt}${proInfo}${st}`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "success")], [colorBtn("🗑 لغو و حذف فایل", "cancel_oversized", "danger")]] }, TOKEN);
+                  await editMessage(chatId, msgId, `⏰ <b>فایل شما در انتظار خرید Pro است!</b>\n\n⏳ زمان باقیمانده: ${Math.max(0, minutesLeft)} دقیقه\n\n${qt}${proInfo}${st}`, { inline_keyboard: [[colorBtn("⭐️ خرید Pro و دریافت لینک", "pro_info", "success")], [colorBtn("🗑 لغو و حذف فایل", "cancel_oversized", "danger")]] }, TOKEN);
                 } else {
                   await editMessage(chatId, msgId, `📭 درخواست فعالی ندارید.\n\n${qt}${proInfo}${st}`, MAIN_KEYBOARD, TOKEN);
                 }
@@ -1525,7 +2728,11 @@ export default {
               else if (state.status === 'waiting' || state.status === 'waiting_oversized') {
                 let pos = '?';
                 try {
-                  pos = isPro ? (await env.DB.prepare('SELECT COUNT(*) as p FROM queue WHERE priority=1 AND position<=(SELECT position FROM queue WHERE chat_id=?)').bind(chatId).first())?.p || '?' : (await env.DB.prepare('SELECT COUNT(*) as p FROM queue WHERE priority=0 AND position<=(SELECT position FROM queue WHERE chat_id=?)').bind(chatId).first())?.p || '?';
+                  const isPro2 = await isProUser(env, chatId);
+                  const r = isPro2
+                    ? await env.DB.prepare('SELECT COUNT(*) as p FROM queue WHERE priority=1 AND position<=(SELECT position FROM queue WHERE chat_id=?)').bind(chatId).first()
+                    : await env.DB.prepare('SELECT COUNT(*) as p FROM queue WHERE priority=0 AND position<=(SELECT position FROM queue WHERE chat_id=?)').bind(chatId).first();
+                  pos = r?.p || '?';
                 } catch (e) { }
                 await editMessage(chatId, msgId, `⏳ در صف — شماره: ${pos}${isPro ? ' ⭐️' : ''}\n\n${qt}${proInfo}${st}`, MAIN_KEYBOARD, TOKEN);
               } else if (state.status === 'awaiting_password' || state.status === 'awaiting_password_oversized') await editMessage(chatId, msgId, `🔐 منتظر رمز عبور هستم.\n\n${qt}${proInfo}${st}`, MAIN_KEYBOARD, TOKEN);
@@ -1534,44 +2741,97 @@ export default {
             return new Response('OK');
           }
 
+          // ---- حذف فایل ----
           if (data === 'delete_my_file') {
             const lb = await dbGetLastBranch(env, chatId);
             if (!lb) { await editMessage(chatId, msgId, "❌ فایل فعالی یافت نشد.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-            if (await deleteBranchFromGitHub(env, lb)) { await dbRemoveActiveBranch(env, lb); await editMessage(chatId, msgId, "✅ فایل حذف شد.", MAIN_KEYBOARD, TOKEN); }
+            const ok = await deleteBranchFromGitHub(env, lb);
+            if (ok) { await dbRemoveActiveBranch(env, lb); await editMessage(chatId, msgId, "✅ فایل حذف شد.", MAIN_KEYBOARD, TOKEN); }
             else await editMessage(chatId, msgId, "❌ خطا در حذف.", MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
+          // ---- لینک جدید (باگ حذف خودکار قبلی برطرف شد) ----
           if (data === 'new_link') {
             await dbDeleteUserState(env, chatId);
             await dbRemoveFromQueue(env, chatId);
             await deleteUserBranch(env, chatId);
             await dbDeleteAdminState(env, chatId);
-            await editMessage(chatId, msgId, "✅ فایل‌های قبلی پاک شدند. آماده دریافت لینک جدید!\n\n📌 راهنما: فایل خود را مستقیماً ارسال کنید یا لینک دانلود آن را بفرستید.", MAIN_KEYBOARD, TOKEN);
+            await editMessage(chatId, msgId, "✅ فایل‌های قبلی پاک شدند. آماده دریافت لینک یا فایل جدید!\n\n📌 راهنما: فایل خود را به @filesto_bot بفرستید و لینک مستقیم را اینجا ارسال کنید، یا فایل را مستقیما به همین ربات بفرستید.", MAIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
+
           return new Response('OK');
         }
 
         // ============================================================
-        // پیام متنی یا ارسال مستقیم فایل (کامل و بدون خلاصه نویسی)
+        // پیام متنی و فایل ارسالی
         // ============================================================
 
         if (update.message) {
           const chatId = update.message.chat.id.toString();
+          
+          // ---- هندل کردن ارسال فایل مستقیم ----
+          const fileObj = update.message.document || update.message.video || update.message.audio;
+          if (fileObj) {
+            const enabled = await getDirectUploadEnabled(env);
+            if (!enabled) {
+              await sendMessage(chatId, "❌ قابلیت ارسال مستقیم در حال بهبود است، لطفاً فعلاً از لینک استفاده کنید.", MAIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
+            if (fileObj.file_size > 2000 * 1024 * 1024) { // 2GB
+              await sendMessage(chatId, "❌ حجم فایل بیشتر از 2GB است (محدودیت API تلگرام).", MAIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
+            const fileUrl = `tg_file_id:${fileObj.file_id}`;
+            const activeUserState = await dbGetUserState(env, chatId);
+            if (activeUserState?.status === 'awaiting_password') {
+              await dbDeleteUserState(env, chatId);
+              await dbRemoveFromQueue(env, chatId);
+            }
+            const channels = await getRequiredChannels(env);
+            if (channels.length > 0) {
+              const isMember = await isUserMemberOfChannels(chatId, channels, TOKEN);
+              if (!isMember) {
+                const jkb = { inline_keyboard: [channels.map(ch => ({ text: `🔗 @${ch}`, url: `https://t.me/${ch}` })), [colorBtn("✅ عضو شدم، بررسی کن", "check_membership", "success")]] };
+                await sendMessage(chatId, "❌ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:", jkb, TOKEN);
+                await savePendingLink(env, chatId, fileUrl, fileObj.file_size || 0);
+                return new Response('OK');
+              }
+            }
+            await processPendingLink(env, chatId, fileUrl, fileObj.file_size || 0, TOKEN);
+            return new Response('OK');
+          }
+
           const text = update.message.text ? update.message.text.trim() : '';
+          if (!text) return new Response('OK');
 
           // بررسی state کاربر عادی - کد تخفیف
           const userState_coupon = await dbGetAdminState(env, chatId);
           if (userState_coupon?.step === 'awaiting_coupon_code' && userState_coupon?.isUser) {
-            if (text === '/cancel' || text.startsWith('/')) { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN); return new Response('OK'); }
+            if (text === '/cancel' || text.startsWith('/')) {
+              await dbDeleteAdminState(env, chatId);
+              await sendMessage(chatId, "❌ لغو شد.", getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
+              return new Response('OK');
+            }
             await dbDeleteAdminState(env, chatId);
             const code = text.toUpperCase().trim();
             const coupon = await getCouponByCode(env, code);
-            if (!coupon) { await sendMessage(chatId, `❌ کد تخفیف "<b>${code}</b>" معتبر نیست یا منقضی شده.`, MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            if (!coupon) {
+              await sendMessage(chatId, `❌ کد تخفیف "<b>${code}</b>" معتبر نیست یا منقضی شده.`, MAIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
             let targetPlans;
-            if (coupon.plan_id) { const plan = await getProPlanById(env, coupon.plan_id); targetPlans = plan ? [plan] : []; } else { targetPlans = await getProPlans(env); }
-            if (!targetPlans.length) { await sendMessage(chatId, "❌ هیچ پلنی برای این کد تخفیف در دسترس نیست.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+            if (coupon.plan_id) {
+              const plan = await getProPlanById(env, coupon.plan_id);
+              targetPlans = plan ? [plan] : [];
+            } else {
+              targetPlans = await getProPlans(env);
+            }
+            if (!targetPlans.length) {
+              await sendMessage(chatId, "❌ هیچ پلنی برای این کد تخفیف در دسترس نیست.", MAIN_KEYBOARD, TOKEN);
+              return new Response('OK');
+            }
             let msg = `🎉 <b>کد تخفیف "${code}" معتبر است!</b>\n\n💰 تخفیف: ${coupon.discount_percent}٪\n`;
             if (coupon.max_uses) msg += `👥 استفاده: ${coupon.used_count}/${coupon.max_uses}\n`;
             if (coupon.expires_at) msg += `⏳ انقضا: ${new Date(coupon.expires_at * 1000).toLocaleDateString('fa-IR')}\n`;
@@ -1581,155 +2841,159 @@ export default {
               const discStars = Math.round(plan.stars_price * (1 - coupon.discount_percent / 100));
               const discUsd = parseFloat((plan.usd_price * (1 - coupon.discount_percent / 100)).toFixed(2));
               msg += `🔹 <b>${plan.name}</b>\n   <s>${plan.stars_price} Stars | ${plan.usd_price}$</s> → <b>${discStars} Stars | ${discUsd}$</b>\n\n`;
-              if (discStars === 0 && discUsd === 0) { rows.push([colorBtn(`🎁 دریافت رایگان: ${plan.name}`, `coupon_buy_stars:${plan.id}:${code}`, "success")]); } else { rows.push([colorBtn(`⭐️ ${plan.name} — ${discStars} Stars`, `coupon_buy_stars:${plan.id}:${code}`, "primary"), colorBtn(`💰 ${discUsd}$`, `coupon_buy_usd:${plan.id}:${code}`, "success")]); }
+              if (discStars === 0 && discUsd === 0) {
+                rows.push([colorBtn(`🎁 دریافت رایگان: ${plan.name}`, `coupon_buy_stars:${plan.id}:${code}`, "success")]);
+              } else {
+                rows.push([
+                  colorBtn(`⭐️ ${plan.name} — ${discStars} Stars`, `coupon_buy_stars:${plan.id}:${code}`, "primary"),
+                  colorBtn(`💰 ${discUsd}$`, `coupon_buy_usd:${plan.id}:${code}`, "success")
+                ]);
+              }
             }
             rows.push([colorBtn("🔙 بازگشت", "back_to_main", "danger")]);
             await sendMessage(chatId, msg, { inline_keyboard: rows }, TOKEN);
             return new Response('OK');
           }
 
-          // وضعیت‌های متنی ادمین
+          // ---- وضعیت ادمین از DB ----
           if (chatId === ADMIN_CHAT_ID) {
             const adminState = await dbGetAdminState(env, chatId);
-            const isDirEn = await getDirectUploadEnabled(env);
-            const ADM_KEY = buildAdminKeyboard(isDirEn);
-            
             if (adminState) {
               const step = adminState.step;
-
+              
               if (step === 'awaiting_broadcast_message') {
-                if (text === '/cancel') { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (text === '/cancel') { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbDeleteAdminState(env, chatId);
                 await env.DB.prepare('DELETE FROM broadcast_state WHERE admin_chat_id = ?').bind(chatId).run();
                 startBroadcast(env, chatId, text, TOKEN).catch(e => console.error('Broadcast error:', e));
-                await sendMessage(chatId, "✅ <b>ارسال پیام همگانی آغاز شد!</b>\n\n📊 برای مشاهده وضعیت روی دکمه «📊 وضعیت ارسال» کلیک کنید.\n\n⚠️ برای لغو در حین ارسال، دستور /cancel_broadcast را بفرستید.", ADM_KEY, TOKEN);
+                await sendMessage(chatId, "✅ <b>ارسال پیام همگانی آغاز شد!</b>\n\n📊 برای مشاهده وضعیت روی دکمه «📊 وضعیت ارسال» کلیک کنید.\n\n⚠️ برای لغو در حین ارسال، دستور /cancel_broadcast را بفرستید.", ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_promote_userid') {
                 const targetUserId = text.trim();
-                if (!targetUserId || isNaN(targetUserId)) { await sendMessage(chatId, "❌ چت آی دی معتبر نیست.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (!targetUserId || isNaN(targetUserId)) { await sendMessage(chatId, "❌ چت آی دی معتبر نیست.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 const result = await adminPromoteToProWithPlan(env, targetUserId, adminState.selectedPlanId, TOKEN);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, result, ADM_KEY, TOKEN);
+                await sendMessage(chatId, result, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_quota_userid') {
                 const result = await adminResetQuota(env, text);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, result, ADM_KEY, TOKEN);
+                await sendMessage(chatId, result, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_add_channel') {
                 const clean = text.replace('@', '').trim();
-                if (!clean) { await sendMessage(chatId, "❌ نام کانال معتبر نیست.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (!clean) { await sendMessage(chatId, "❌ نام کانال معتبر نیست.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 const channels = await getRequiredChannels(env);
-                if (channels.includes(clean)) { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, `⚠️ @${clean} قبلاً اضافه شده.`, ADM_KEY, TOKEN); return new Response('OK'); }
+                if (channels.includes(clean)) { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, `⚠️ @${clean} قبلاً اضافه شده.`, ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 channels.push(clean);
                 await setRequiredChannels(env, channels);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ کانال @${clean} اضافه شد.`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ کانال @${clean} اضافه شد.`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_discount_duration') {
                 const hours = parseInt(text);
-                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید. مثال: 24", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید. مثال: 24", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_discount_stars', hours });
-                await sendMessage(chatId, `✅ مدت: ${hours} ساعت\n\nمرحله ۲ از ۳: تعداد Stars تخفیفی را ارسال کنید (عدد صحیح):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ مدت: ${hours} ساعت\n\nمرحله ۲ از ۳: تعداد Stars تخفیفی را ارسال کنید (عدد صحیح):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_discount_stars') {
                 const sp = parseInt(text);
-                if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید. مثال: 40", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید. مثال: 40", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_discount_usd', starsPrice: sp, hours: adminState.hours });
-                await sendMessage(chatId, `Stars: ${sp}\n\nمرحله ۳ از ۳: قیمت دلاری تخفیفی را ارسال کنید (عدد اعشاری، مثال: 0.7):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `Stars: ${sp}\n\nمرحله ۳ از ۳: قیمت دلاری تخفیفی را ارسال کنید (عدد اعشاری، مثال: 0.7):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_discount_usd') {
                 const up = parseFloat(text);
-                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید. مثال: 0.7", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید. مثال: 0.7", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await setDiscount(env, adminState.starsPrice, up, adminState.hours);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>تخفیف سراسری تنظیم شد!</b>\n Stars: ${adminState.starsPrice} | 💰 ${up} USD\n⏳ اعتبار: ${adminState.hours} ساعت`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ <b>تخفیف سراسری تنظیم شد!</b>\n Stars: ${adminState.starsPrice} | 💰 ${up} USD\n⏳ اعتبار: ${adminState.hours} ساعت`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_stars_price') {
                 const sp = parseInt(text);
-                if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_usd_price', starsPrice: sp });
-                await sendMessage(chatId, `Stars: ${sp}\n\n💵 قیمت دلاری (بدون تخفیف) را وارد کنید (مثال: 1.5):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `Stars: ${sp}\n\n💵 قیمت دلاری (بدون تخفیف) را وارد کنید (مثال: 1.5):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_usd_price') {
                 const up = parseFloat(text);
-                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید. مثال: 1.5", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید. مثال: 1.5", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await setBotSetting(env, 'stars_price', adminState.starsPrice);
                 await setBotSetting(env, 'usd_price', up);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>قیمت‌های پایه بروز شد!</b>\n Stars: ${adminState.starsPrice}\n💵 دلار: ${up}$`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ <b>قیمت‌های پایه بروز شد!</b>\n Stars: ${adminState.starsPrice}\n💵 دلار: ${up}$`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_normal_daily_files') {
                 const files = parseInt(text);
-                if (isNaN(files) || files <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(files) || files <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_normal_daily_direct_files', normalDailyFiles: files });
-                await sendMessage(chatId, `✅ مرحله ۱: فایل کل: ${files}\n\nمرحله ۲ از ۷: چند فایل از این تعداد، مجاز به ارسال مستقیم است؟`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ مرحله ۱: فایل کل عادی: ${files}\n\nمرحله ۲ از ۷: چند فایل از این تعداد مجاز به ارسال مستقیم است؟`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_normal_daily_direct_files') {
-                const dirFiles = parseInt(text);
-                if (isNaN(dirFiles) || dirFiles < 0 || dirFiles > adminState.normalDailyFiles) { await sendMessage(chatId, "❌ عدد بین ۰ تا فایل کل را وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_normal_daily_volume', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirectFiles: dirFiles });
-                await sendMessage(chatId, `✅ مرحله ۲: مستقیم مجاز: ${dirFiles}\n\nمرحله ۳ از ۷: حجم روزانه عادی (مگابایت) را وارد کنید:`, ADM_KEY, TOKEN);
+                const files = parseInt(text);
+                if (isNaN(files) || files < 0) { await sendMessage(chatId, "❌ عدد صحیح وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_normal_daily_volume', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirect: files });
+                await sendMessage(chatId, `✅ مرحله ۲: آپلود مستقیم عادی: ${files}\n\nمرحله ۳ از ۷: حجم روزانه برای کاربران عادی (مگابایت) را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_normal_daily_volume') {
                 const mb = parseInt(text);
-                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_normal_size_limit', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirectFiles: adminState.normalDailyDirectFiles, normalVolMB: mb });
-                await sendMessage(chatId, `✅ مرحله ۳: حجم روزانه عادی: ${mb} مگابایت\n\nمرحله ۴ از ۷: حداکثر حجم هر فایل (مگابایت) را وارد کنید:`, ADM_KEY, TOKEN);
+                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_normal_size_limit', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirect: adminState.normalDailyDirect, normalVolMB: mb });
+                await sendMessage(chatId, `✅ مرحله ۳: حجم روزانه عادی: ${mb} مگابایت\n\nمرحله ۴ از ۷: حداکثر حجم هر فایل برای کاربران عادی (مگابایت) را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_normal_size_limit') {
                 const mb = parseInt(text);
-                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (مگابایت).", ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_pro_size_limit', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirectFiles: adminState.normalDailyDirectFiles, normalVolMB: adminState.normalVolMB, normalSizeMB: mb });
-                await sendMessage(chatId, `✅ مرحله ۴: حد فایل عادی: ${mb} مگابایت\n\nمرحله ۵ از ۷: حداکثر حجم هر فایل برای Pro (مگابایت) را وارد کنید:`, ADM_KEY, TOKEN);
+                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (مگابایت).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_pro_size_limit', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirect: adminState.normalDailyDirect, normalVolMB: adminState.normalVolMB, normalSizeMB: mb });
+                await sendMessage(chatId, `✅ مرحله ۴: حد فایل عادی: ${mb} مگابایت\n\nمرحله ۵ از ۷: حداکثر حجم هر فایل برای کاربران Pro (پیش‌فرض، مگابایت) را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_pro_size_limit') {
                 const mb = parseInt(text);
-                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (مگابایت).", ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_normal_ttl', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirectFiles: adminState.normalDailyDirectFiles, normalVolMB: adminState.normalVolMB, normalSizeMB: adminState.normalSizeMB, proSizeMB: mb });
-                await sendMessage(chatId, `✅ مرحله ۵: حد فایل Pro: ${mb} مگابایت\n\nمرحله ۶ از ۷: ماندگاری فایل کاربران عادی (ساعت) را وارد کنید:`, ADM_KEY, TOKEN);
+                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (مگابایت).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_normal_ttl', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirect: adminState.normalDailyDirect, normalVolMB: adminState.normalVolMB, normalSizeMB: adminState.normalSizeMB, proSizeMB: mb });
+                await sendMessage(chatId, `✅ مرحله ۵: حد فایل Pro: ${mb} مگابایت\n\nمرحله ۶ از ۷: ماندگاری فایل برای کاربران عادی (ساعت) را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_normal_ttl') {
                 const hours = parseInt(text);
-                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (ساعت).", ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_pro_ttl', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirectFiles: adminState.normalDailyDirectFiles, normalVolMB: adminState.normalVolMB, normalSizeMB: adminState.normalSizeMB, proSizeMB: adminState.proSizeMB, normalTTLh: hours });
-                await sendMessage(chatId, `✅ مرحله ۶: TTL عادی: ${hours} ساعت\n\nمرحله ۷ از ۷: ماندگاری فایل Pro (روز) را وارد کنید:`, ADM_KEY, TOKEN);
+                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (ساعت).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_pro_ttl', normalDailyFiles: adminState.normalDailyFiles, normalDailyDirect: adminState.normalDailyDirect, normalVolMB: adminState.normalVolMB, normalSizeMB: adminState.normalSizeMB, proSizeMB: adminState.proSizeMB, normalTTLh: hours });
+                await sendMessage(chatId, `✅ مرحله ۶: TTL عادی: ${hours} ساعت\n\nمرحله ۷ از ۷: ماندگاری فایل برای کاربران Pro (روز) را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_pro_ttl') {
                 const days = parseInt(text);
-                if (isNaN(days) || days <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (روز).", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(days) || days <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (روز).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await setBotSetting(env, 'normal_daily_files', adminState.normalDailyFiles);
-                await setBotSetting(env, 'normal_daily_direct_files', adminState.normalDailyDirectFiles);
+                await setBotSetting(env, 'normal_daily_direct_files', adminState.normalDailyDirect);
                 await setBotSetting(env, 'normal_daily_volume_mb', adminState.normalVolMB);
                 await setBotSetting(env, 'normal_file_size_limit_mb', adminState.normalSizeMB);
                 await setBotSetting(env, 'pro_file_size_limit_mb', adminState.proSizeMB);
@@ -1737,82 +3001,84 @@ export default {
                 await setBotSetting(env, 'pro_max_time_sec', days * 86400);
                 await dbDeleteAdminState(env, chatId);
                 await sendMessage(chatId,
-                  `✅ <b>محدودیت‌ها بروز شد!</b>\n\n📁 فایل عادی: ${adminState.normalDailyFiles} کل (${adminState.normalDailyDirectFiles} مستقیم)\n📊 حجم روزانه عادی: ${adminState.normalVolMB} MB\n📏 حجم فایل عادی: ${adminState.normalSizeMB} MB\n📏 حجم فایل Pro: ${adminState.proSizeMB} MB\n⏱ ماندگاری عادی: ${adminState.normalTTLh} ساعت\n⏱ ماندگاری Pro: ${days} روز`,
-                  ADM_KEY, TOKEN);
+                  `✅ <b>محدودیت‌ها بروز شد!</b>\n\n📁 فایل روزانه عادی: ${adminState.normalDailyFiles}\n🚀 مستقیم عادی: ${adminState.normalDailyDirect}\n📊 حجم روزانه عادی: ${adminState.normalVolMB} مگابایت\n📏 حجم فایل عادی: ${adminState.normalSizeMB} مگابایت\n📏 حجم فایل Pro (پیش‌فرض): ${adminState.proSizeMB} مگابایت\n⏱ ماندگاری عادی: ${adminState.normalTTLh} ساعت\n⏱ ماندگاری Pro: ${days} روز\n\n💡 برای تنظیم محدودیت‌های اختصاصی هر پلن، از منوی مدیریت پلن‌ها استفاده کنید.`,
+                  ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- مدیریت پلن‌ها ----
               if (step === 'awaiting_plan_name') {
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_duration', name: text });
-                await sendMessage(chatId, `📦 نام: <b>${text}</b>\n\nمرحله ۲ از ۸: مدت (روز) را وارد کنید:\nمثال: <code>30</code>`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📦 نام: <b>${text}</b>\n\nمرحله ۲ از ۸: مدت (روز) را وارد کنید:\nمثال: <code>30</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_duration') {
                 const days = parseInt(text);
-                if (isNaN(days) || days <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(days) || days <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_files', name: adminState.name, days });
-                await sendMessage(chatId, `📅 مدت: ${days} روز\n\nمرحله ۳ از ۸: تعداد کل فایل مجاز روزانه را وارد کنید:`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📅 مدت: ${days} روز\n\nمرحله ۳ از ۸: تعداد کل فایل مجاز روزانه را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_daily_files') {
                 const files = parseInt(text);
-                if (isNaN(files) || files <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(files) || files <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_direct_files', name: adminState.name, days: adminState.days, dailyFiles: files });
-                await sendMessage(chatId, `📁 فایل کل روزانه: ${files}\n\nمرحله ۴ از ۸: چند فایل از این ${files} عدد، مجاز به ارسال مستقیم است؟`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📁 فایل کل روزانه: ${files}\n\nمرحله ۴ از ۸: چند فایل مجاز به ارسال مستقیم است؟`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_daily_direct_files') {
-                const dirFiles = parseInt(text);
-                if (isNaN(dirFiles) || dirFiles < 0 || dirFiles > adminState.dailyFiles) { await sendMessage(chatId, `❌ عدد بین ۰ تا ${adminState.dailyFiles} را وارد کنید.`, ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_volume', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: dirFiles });
-                await sendMessage(chatId, `📥 فایل مستقیم مجاز: ${dirFiles}\n\nمرحله ۵ از ۸: حجم روزانه (گیگابایت) را وارد کنید:\nمثال: <code>6</code>`, ADM_KEY, TOKEN);
+                const files = parseInt(text);
+                if (isNaN(files) || files < 0) { await sendMessage(chatId, "❌ عدد صحیح وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_plan_daily_volume', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: files });
+                await sendMessage(chatId, `🚀 آپلود مستقیم: ${files}\n\nمرحله ۵ از ۸: حجم روزانه (گیگابایت) را وارد کنید:\nمثال: <code>6</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_daily_volume') {
                 const gb = parseFloat(text);
-                if (isNaN(gb) || gb <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(gb) || gb <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_max_file_size', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: gb });
-                await sendMessage(chatId, `💾 حجم روزانه: ${gb} گیگابایت\n\nمرحله ۶ از ۸: حداکثر حجم هر فایل (مگابایت) را وارد کنید:\nمثال: <code>2048</code>`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `💾 حجم روزانه: ${gb} گیگابایت\n\nمرحله ۶ از ۸: حداکثر حجم هر فایل (مگابایت) را وارد کنید:\nمثال: <code>2048</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_max_file_size') {
                 const mb = parseInt(text);
-                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(mb) || mb <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید (مگابایت).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_stars_price', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: mb });
-                await sendMessage(chatId, `📏 حداکثر حجم فایل: ${mb} مگابایت\n\nمرحله ۷ از ۸: قیمت به Stars را وارد کنید:`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📏 حداکثر حجم فایل: ${mb} مگابایت\n\nمرحله ۷ از ۸: قیمت به Stars را وارد کنید (عدد صحیح):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_stars_price') {
                 const sp = parseInt(text);
-                if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(sp) || sp <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_usd_price', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: sp });
-                await sendMessage(chatId, `⭐️ Stars: ${sp}\n\nمرحله ۸ از ۸: قیمت دلاری را وارد کنید (مثال: <code>1.5</code>):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `⭐️ Stars: ${sp}\n\nمرحله ۸ از ۸: قیمت دلاری را وارد کنید (مثال: <code>1.5</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_usd_price') {
                 const up = parseFloat(text);
-                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await env.DB.prepare('INSERT INTO pro_plans (name, duration_days, daily_files, daily_direct_files, daily_volume_gb, max_file_size_mb, stars_price, usd_price, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0)').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, up).run();
                 await dbDeleteAdminState(env, chatId);
                 await sendMessage(chatId,
-                  `✅ <b>پلن جدید ایجاد شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز\n📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)\n💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت\n Stars: ${adminState.starsPrice} | 💵 ${up}$`,
-                  ADM_KEY, TOKEN);
+                  `✅ <b>پلن جدید ایجاد شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز\n📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز\n💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${up}$`,
+                  ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- ویرایش پلن ----
               if (step === 'awaiting_plan_edit_name') {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newName = text === '-' ? plan.name : text;
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_duration', planId, name: newName });
-                await sendMessage(chatId, `📅 نام: <b>${newName}</b>\n\nمرحله ۲ از ۸: مدت فعلی: ${plan.duration_days} روز\nمدت جدید را وارد کنید (یا <code>-</code> برای نگه‌داشتن):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📅 نام: <b>${newName}</b>\n\nمرحله ۲ از ۸: مدت فعلی: ${plan.duration_days} روز\nمدت جدید را وارد کنید (یا <code>-</code> برای نگه‌داشتن):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1820,9 +3086,9 @@ export default {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newDays = text === '-' ? plan.duration_days : parseInt(text);
-                if (isNaN(newDays) || newDays <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(newDays) || newDays <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_files', planId, name: adminState.name, days: newDays });
-                await sendMessage(chatId, `📅 مدت: ${newDays} روز\n\nمرحله ۳ از ۸: تعداد کل فایل فعلی: ${plan.daily_files}\nمقدار جدید وارد کنید (یا <code>-</code>):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📅 مدت: ${newDays} روز\n\nمرحله ۳ از ۸: تعداد کل فایل روزانه فعلی: ${plan.daily_files}\nمقدار جدید وارد کنید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1830,19 +3096,20 @@ export default {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newFiles = text === '-' ? plan.daily_files : parseInt(text);
-                if (isNaN(newFiles) || newFiles <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(newFiles) || newFiles <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_direct_files', planId, name: adminState.name, days: adminState.days, dailyFiles: newFiles });
-                await sendMessage(chatId, `📁 فایل کل: ${newFiles}\n\nمرحله ۴ از ۸: مستقیم مجاز فعلی: ${plan.daily_direct_files}\nمقدار جدید را وارد کنید (یا <code>-</code>):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📁 فایل کل روزانه: ${newFiles}\n\nمرحله ۴ از ۸: تعداد مجاز ارسال مستقیم فعلی: ${plan.daily_direct_files !== undefined ? plan.daily_direct_files : 3}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_edit_daily_direct_files') {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
-                const newDirFiles = text === '-' ? (plan.daily_direct_files ?? plan.daily_files) : parseInt(text);
-                if (isNaN(newDirFiles) || newDirFiles < 0 || newDirFiles > adminState.dailyFiles) { await sendMessage(chatId, `❌ عدد بین ۰ تا ${adminState.dailyFiles} وارد کنید.`, ADM_KEY, TOKEN); return new Response('OK'); }
-                await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_volume', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: newDirFiles });
-                await sendMessage(chatId, `📥 مستقیم مجاز: ${newDirFiles}\n\nمرحله ۵ از ۸: حجم روزانه فعلی: ${plan.daily_volume_gb} GB\nمقدار جدید (گیگابایت، یا <code>-</code>):`, ADM_KEY, TOKEN);
+                const currentDirect = plan.daily_direct_files !== undefined ? plan.daily_direct_files : 3;
+                const newFiles = text === '-' ? currentDirect : parseInt(text);
+                if (isNaN(newFiles) || newFiles < 0) { await sendMessage(chatId, "❌ عدد صحیح وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+                await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_daily_volume', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: newFiles });
+                await sendMessage(chatId, `🚀 ارسال مستقیم روزانه: ${newFiles}\n\nمرحله ۵ از ۸: حجم روزانه فعلی: ${plan.daily_volume_gb} GB\nمقدار جدید (گیگابایت، یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1850,9 +3117,9 @@ export default {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newGB = text === '-' ? plan.daily_volume_gb : parseFloat(text);
-                if (isNaN(newGB) || newGB <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(newGB) || newGB <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_max_file_size', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: newGB });
-                await sendMessage(chatId, `💾 حجم روزانه: ${newGB} GB\n\nمرحله ۶ از ۸: حداکثر حجم فایل فعلی: ${plan.max_file_size_mb || 2048} MB\nمقدار جدید (یا <code>-</code>):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `💾 حجم روزانه: ${newGB} GB\n\nمرحله ۶ از ۸: حداکثر حجم فایل فعلی: ${plan.max_file_size_mb || 2048} مگابایت\nمقدار جدید (مگابایت، یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1860,9 +3127,9 @@ export default {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newMB = text === '-' ? (plan.max_file_size_mb || 2048) : parseInt(text);
-                if (isNaN(newMB) || newMB <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(newMB) || newMB <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_stars_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: newMB });
-                await sendMessage(chatId, `📏 حجم فایل: ${newMB} مگابایت\n\nمرحله ۷ از ۸: Stars فعلی: ${plan.stars_price}\nمقدار جدید (یا <code>-</code>):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📏 حجم فایل: ${newMB} مگابایت\n\nمرحله ۷ از ۸: Stars فعلی: ${plan.stars_price}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1870,9 +3137,9 @@ export default {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newStars = text === '-' ? plan.stars_price : parseInt(text);
-                if (isNaN(newStars) || newStars <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(newStars) || newStars <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_usd_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: newStars });
-                await sendMessage(chatId, `⭐️ Stars: ${newStars}\n\nمرحله ۸ از ۸: قیمت دلاری فعلی: ${plan.usd_price}$\nمقدار جدید (یا <code>-</code>):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `⭐️ Stars: ${newStars}\n\nمرحله ۸ از ۸: قیمت دلاری فعلی: ${plan.usd_price}$\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1880,79 +3147,87 @@ export default {
                 const planId = adminState.planId;
                 const plan = await getProPlanById(env, planId);
                 const newUsd = text === '-' ? plan.usd_price : parseFloat(text);
-                if (isNaN(newUsd) || newUsd <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(newUsd) || newUsd <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await env.DB.prepare('UPDATE pro_plans SET name=?, duration_days=?, daily_files=?, daily_direct_files=?, daily_volume_gb=?, max_file_size_mb=?, stars_price=?, usd_price=? WHERE id=?').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, newUsd, planId).run();
                 await dbDeleteAdminState(env, chatId);
                 await sendMessage(chatId,
-                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم) | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${newUsd}$`,
-                  ADM_KEY, TOKEN);
+                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${newUsd}$\n\n⚠️ کاربران با پلن فعال تغییر نمی‌کنند (snapshot محفوظ است)`,
+                  ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- تخفیف پلن ----
               if (step === 'awaiting_plan_discount_percent') {
                 const percent = parseFloat(text);
-                if (isNaN(percent) || percent < 0 || percent > 100) { await sendMessage(chatId, "❌ عدد بین ۰ تا ۱۰۰ وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(percent) || percent < 0 || percent > 100) { await sendMessage(chatId, "❌ عدد بین ۰ تا ۱۰۰ وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 if (percent === 0) {
                   await env.DB.prepare('UPDATE plan_discounts SET active = 0 WHERE plan_id = ?').bind(adminState.planId).run();
                   await dbDeleteAdminState(env, chatId);
-                  await sendMessage(chatId, `✅ تخفیف پلن "${adminState.planName}" لغو شد.`, ADM_KEY, TOKEN);
+                  await sendMessage(chatId, `✅ تخفیف پلن "${adminState.planName}" لغو شد.`, ADMIN_KEYBOARD, TOKEN);
                   return new Response('OK');
                 }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_discount_duration', planId: adminState.planId, planName: adminState.planName, discountPercent: percent });
-                await sendMessage(chatId, `🎉 تخفیف: ${percent}٪\n\nمدت اعتبار تخفیف (ساعت) را وارد کنید:`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `🎉 تخفیف: ${percent}٪\n\nمدت اعتبار تخفیف (ساعت) را وارد کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_plan_discount_duration') {
                 const hours = parseInt(text);
-                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 const expiresAt = Math.floor(Date.now() / 1000) + hours * 3600;
                 await env.DB.prepare('UPDATE plan_discounts SET active = 0 WHERE plan_id = ?').bind(adminState.planId).run();
                 await env.DB.prepare('INSERT INTO plan_discounts (plan_id, discount_percent, active, expires_at) VALUES (?, ?, 1, ?)').bind(adminState.planId, adminState.discountPercent, expiresAt).run();
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>تخفیف پلن "${adminState.planName}" تنظیم شد!</b>\n🎉 ${adminState.discountPercent}٪ تخفیف\n⏳ اعتبار: ${hours} ساعت`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ <b>تخفیف پلن "${adminState.planName}" تنظیم شد!</b>\n🎉 ${adminState.discountPercent}٪ تخفیف\n⏳ اعتبار: ${hours} ساعت`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- تخفیف تمدید ----
               if (step === 'awaiting_renewal_discount_percent') {
                 const percent = parseFloat(text);
-                if (isNaN(percent) || percent < 0 || percent > 100) { await sendMessage(chatId, "❌ عدد بین ۰ تا ۱۰۰ وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(percent) || percent < 0 || percent > 100) { await sendMessage(chatId, "❌ عدد بین ۰ تا ۱۰۰ وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 if (percent === 0) {
                   await setBotSetting(env, 'renewal_discount_percent', '0');
                   await dbDeleteAdminState(env, chatId);
-                  await sendMessage(chatId, `✅ تخفیف تمدید غیرفعال شد.`, ADM_KEY, TOKEN);
+                  await sendMessage(chatId, `✅ تخفیف تمدید غیرفعال شد.`, ADMIN_KEYBOARD, TOKEN);
                   return new Response('OK');
                 }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_renewal_notify_hours', discountPercent: percent });
-                await sendMessage(chatId, `🎉 تخفیف تمدید: ${percent}٪\n\nچند ساعت قبل از انقضا به کاربران نوتیف فرستاده شود?\nمثال: <code>48</code>`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `🎉 تخفیف تمدید: ${percent}٪\n\nچند ساعت قبل از انقضا به کاربران نوتیف فرستاده شود?\nمثال: <code>48</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_renewal_notify_hours') {
                 const hours = parseInt(text);
-                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(hours) || hours <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await setBotSetting(env, 'renewal_discount_percent', adminState.discountPercent);
                 await setBotSetting(env, 'renewal_notify_hours', hours);
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>تخفیف تمدید تنظیم شد!</b>\n🎉 ${adminState.discountPercent}٪ تخفیف برای تمدید\n⏰ نوتیف ${hours} ساعت قبل از انقضا`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ <b>تخفیف تمدید تنظیم شد!</b>\n🎉 ${adminState.discountPercent}٪ تخفیف برای تمدید\n⏰ نوتیف ${hours} ساعت قبل از انقضا\n\n💡 نوتیف‌ها هنگام فراخوانی /api/cleanup-branches ارسال می‌شوند.`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- حالت maintenance ----
               if (step === 'awaiting_maintenance_exception') {
                 let exceptions = [];
-                if (text.toLowerCase() !== 'skip') { exceptions = text.split(',').map(s => s.trim()).filter(s => s.length > 0); }
+                if (text.toLowerCase() !== 'skip') {
+                  exceptions = text.split(',').map(s => s.trim()).filter(s => s.length > 0);
+                }
                 await setBotSetting(env, 'maintenance_mode', '1');
                 await setBotSetting(env, 'maintenance_exceptions', JSON.stringify(exceptions));
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `🔴 <b>حالت بروزرسانی فعال شد!</b>\n\n🧪 کاربران استثنا: ${exceptions.length > 0 ? exceptions.join(', ') : 'ندارد'}\n\nبرای غیرفعال کردن دوباره روی دکمه بزنید.`, ADM_KEY, TOKEN);
+                await sendMessage(chatId,
+                  `🔴 <b>حالت بروزرسانی فعال شد!</b>\n\n🧪 کاربران استثنا: ${exceptions.length > 0 ? exceptions.join(', ') : 'ندارد'}\n\nبرای غیرفعال کردن دوباره روی دکمه بزنید.`,
+                  ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- ارسال مستقیم پیام ----
               if (step === 'awaiting_direct_chat_id') {
                 const targetId = text.trim();
-                if (!targetId || isNaN(targetId)) { await sendMessage(chatId, "❌ چت آی دی معتبر نیست.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (!targetId || isNaN(targetId)) { await sendMessage(chatId, "❌ چت آی دی معتبر نیست.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_direct_message_text', targetChatId: targetId });
-                await sendMessage(chatId, `📩 پیام برای کاربر ${targetId}:\n\nمتن پیام را ارسال کنید:`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `📩 پیام برای کاربر ${targetId}:\n\nمتن پیام را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -1961,94 +3236,108 @@ export default {
                 try {
                   await sendMessage(targetChatId, text, MAIN_KEYBOARD, TOKEN);
                   await dbDeleteAdminState(env, chatId);
-                  await sendMessage(chatId, `✅ پیام به ${targetChatId} ارسال شد.`, ADM_KEY, TOKEN);
+                  await sendMessage(chatId, `✅ پیام به ${targetChatId} ارسال شد.`, ADMIN_KEYBOARD, TOKEN);
                 } catch (e) {
                   await dbDeleteAdminState(env, chatId);
-                  await sendMessage(chatId, `❌ خطا در ارسال پیام به ${targetChatId}.`, ADM_KEY, TOKEN);
+                  await sendMessage(chatId, `❌ خطا در ارسال پیام به ${targetChatId}.`, ADMIN_KEYBOARD, TOKEN);
                 }
                 return new Response('OK');
               }
 
+              // ---- ویزارد تیرهای رفرال ----
               if (step === 'awaiting_referral_tier_count') {
-                if (text === '/cancel') { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (text === '/cancel') { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 const count = parseInt(text);
-                if (isNaN(count) || count <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(count) || count <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_referral_tier_label', tiers: adminState.tiers || [], newTierCount: count });
-                await sendMessage(chatId, `✅ تعداد رفرال: ${count}\n\nعنوان جایزه را وارد کنید:\nمثال: <code>پلن ۳ روزه رایگان</code>`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ تعداد رفرال: ${count}\n\nعنوان جایزه را وارد کنید:\nمثال: <code>پلن ۳ روزه رایگان</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_referral_tier_label') {
                 const label = text;
                 await dbSetAdminState(env, chatId, { step: 'awaiting_referral_tier_plan_days', tiers: adminState.tiers || [], newTierCount: adminState.newTierCount, newTierLabel: label });
-                await sendMessage(chatId, `✅ عنوان: ${label}\n\nنوع پاداش را تعیین کنید:\nاگر می‌خواهید <b>کد تخفیف ۱۰۰ درصدی</b> بگیرد، ارسال کنید <code>CODE</code>\n\nاگر می‌خواهید اشتراک مستقیماً فعال شود، تعداد روزها (مثال: <code>3</code>) یا ID پلن با پیشوند P (مثال: <code>P2</code>) را ارسال کنید:`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ عنوان: ${label}\n\nنوع پاداش را تعیین کنید:\n\nاگر می‌خواهید کاربر مستقیم یک <b>کد تخفیف ۱۰۰ درصدی</b> بگیرد و به بقیه بدهد، ارسال کنید <code>CODE</code>\n\nاگر می‌خواهید مستقیما اشتراک برای خودش فعال شود، تعداد روزها (مثال: <code>3</code>) یا ID پلن با پیشوند P (مثال: <code>P2</code>) را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_referral_tier_plan_days') {
-                let planId = null, planDays = 1, rewardType = 'auto_pro';
-                if (text.toUpperCase() === 'CODE') { rewardType = 'discount_code'; } 
-                else if (text.toUpperCase().startsWith('P')) {
+                let planId = null;
+                let planDays = 1;
+                let rewardType = 'auto_pro';
+
+                if (text.toUpperCase() === 'CODE') {
+                   rewardType = 'discount_code';
+                } else if (text.toUpperCase().startsWith('P')) {
                   planId = parseInt(text.substring(1));
                   const plan = await getProPlanById(env, planId);
-                  if (!plan) { await sendMessage(chatId, "❌ پلن یافت نشد.", ADM_KEY, TOKEN); return new Response('OK'); }
+                  if (!plan) { await sendMessage(chatId, "❌ پلن یافت نشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                   planDays = plan.duration_days;
                 } else {
                   planDays = parseInt(text);
-                  if (isNaN(planDays) || planDays <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت یا CODE وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                  if (isNaN(planDays) || planDays <= 0) { await sendMessage(chatId, "❌ عدد صحیح مثبت یا کلمه CODE وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 }
 
                 const newTiers = [...(adminState.tiers || []), { count: adminState.newTierCount, plan_id: planId, plan_days: planDays, label: adminState.newTierLabel, reward_type: rewardType }];
                 newTiers.sort((a, b) => a.count - b.count);
                 await setBotSetting(env, 'referral_tiers', JSON.stringify(newTiers));
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>تیر جدید اضافه شد!</b>\n\n🎯 ${adminState.newTierCount} نفر → ${adminState.newTierLabel}`, ADM_KEY, TOKEN);
+                await sendMessage(chatId,
+                  `✅ <b>تیر جدید اضافه شد!</b>\n\n🎯 ${adminState.newTierCount} نفر → ${adminState.newTierLabel}\n${rewardType === 'discount_code' ? '🎟 تولید کد تخفیف ۱۰۰ درصدی' : (planId ? `👑 پلن مستفیم: ID ${planId}` : `⏱ مدت مستقیم: ${planDays} روز`)}\n\n📋 تیرهای فعلی:\n${newTiers.map((t, i) => `${i + 1}. ${t.count} نفر → ${t.label}`).join('\n')}`,
+                  ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
+              // ---- ایجاد کد تخفیف (ادمین) ----
               if (step === 'awaiting_coupon_code_admin') {
                 const code = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
-                if (!code || code.length < 3) { await sendMessage(chatId, "❌ کد تخفیف باید حداقل ۳ حرف انگلیسی/عدد باشد.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (!code || code.length < 3) { await sendMessage(chatId, "❌ کد تخفیف باید حداقل ۳ حرف انگلیسی/عدد باشد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 const existing = await env.DB.prepare('SELECT id FROM coupons WHERE code = ?').bind(code).first();
-                if (existing) { await sendMessage(chatId, `❌ کد "${code}" قبلاً ثبت شده.`, ADM_KEY, TOKEN); return new Response('OK'); }
+                if (existing) { await sendMessage(chatId, `❌ کد "${code}" قبلاً ثبت شده.`, ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_discount', code });
-                await sendMessage(chatId, `✅ کد: <b>${code}</b>\n\nمرحله ۲ از ۵: درصد تخفیف را وارد کنید (مثال: <code>50</code> برای ۵۰٪، <code>100</code> برای رایگان):`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `✅ کد: <b>${code}</b>\n\nمرحله ۲ از ۵: درصد تخفیف را وارد کنید (مثال: <code>50</code> برای ۵۰٪، <code>100</code> برای رایگان):`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_coupon_discount') {
                 const percent = parseFloat(text);
-                if (isNaN(percent) || percent <= 0 || percent > 100) { await sendMessage(chatId, "❌ عدد بین ۱ تا ۱۰۰ وارد کنید.", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(percent) || percent <= 0 || percent > 100) { await sendMessage(chatId, "❌ عدد بین ۱ تا ۱۰۰ وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_max_uses', code: adminState.code, discountPercent: percent });
-                await sendMessage(chatId, `🎉 مرحله ۲: تخفیف: ${percent}٪\n\nمرحله ۳ از ۵: حداکثر تعداد استفاده را وارد کنید:\nبرای نامحدود: <code>0</code>`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `🎉 مرحله ۲: تخفیف: ${percent}٪\n\nمرحله ۳ از ۵: حداکثر تعداد استفاده را وارد کنید:\nبرای نامحدود: <code>0</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_coupon_max_uses') {
                 const maxUses = parseInt(text);
-                if (isNaN(maxUses) || maxUses < 0) { await sendMessage(chatId, "❌ عدد صحیح غیرمنفی وارد کنید (۰ برای نامحدود).", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(maxUses) || maxUses < 0) { await sendMessage(chatId, "❌ عدد صحیح غیرمنفی وارد کنید (۰ برای نامحدود).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_expires', code: adminState.code, discountPercent: adminState.discountPercent, maxUses: maxUses || null });
-                await sendMessage(chatId, `👥 مرحله ۳: حداکثر استفاده: ${maxUses || 'نامحدود'}\n\nمرحله ۴ از ۵: مدت اعتبار کد (ساعت) را وارد کنید:\nبرای بدون محدودیت زمانی: <code>0</code>`, ADM_KEY, TOKEN);
+                await sendMessage(chatId, `👥 مرحله ۳: حداکثر استفاده: ${maxUses || 'نامحدود'}\n\nمرحله ۴ از ۵: مدت اعتبار کد (ساعت) را وارد کنید:\nبرای بدون محدودیت زمانی: <code>0</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_coupon_expires') {
                 const hours = parseInt(text);
-                if (isNaN(hours) || hours < 0) { await sendMessage(chatId, "❌ عدد صحیح غیرمنفی وارد کنید (۰ برای بدون محدودیت).", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(hours) || hours < 0) { await sendMessage(chatId, "❌ عدد صحیح غیرمنفی وارد کنید (۰ برای بدون محدودیت).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { step: 'awaiting_coupon_plan', code: adminState.code, discountPercent: adminState.discountPercent, maxUses: adminState.maxUses, expiresHours: hours || null });
                 const plans = await getAllProPlans(env);
-                const plansText = plans.length > 0 ? plans.map(p => `• <code>${p.id}</code>: ${p.name}`).join('\n') : 'هیچ پلنی تعریف نشده';
-                await sendMessage(chatId, `⏳ مرحله ۴: اعتبار: ${hours || 'نامحدود'} ساعت\n\nمرحله ۵ از ۵: آی‌دی پلنی که تخفیف روی آن اعمال می‌شود را وارد کنید:\n${plansText}\n\nبرای همه پلن‌ها: <code>0</code>`, ADM_KEY, TOKEN);
+                const plansText = plans.length > 0
+                  ? plans.map(p => `• <code>${p.id}</code>: ${p.name}`).join('\n')
+                  : 'هیچ پلنی تعریف نشده';
+                await sendMessage(chatId, `⏳ مرحله ۴: اعتبار: ${hours || 'نامحدود'} ساعت\n\nمرحله ۵ از ۵: آی‌دی پلنی که تخفیف روی آن اعمال می‌شود را وارد کنید:\n${plansText}\n\nبرای همه پلن‌ها: <code>0</code>`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
               if (step === 'awaiting_coupon_plan') {
                 const planId = parseInt(text);
-                if (isNaN(planId) || planId < 0) { await sendMessage(chatId, "❌ عدد صحیح غیرمنفی وارد کنید (۰ برای همه پلن‌ها).", ADM_KEY, TOKEN); return new Response('OK'); }
+                if (isNaN(planId) || planId < 0) { await sendMessage(chatId, "❌ عدد صحیح غیرمنفی وارد کنید (۰ برای همه پلن‌ها).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 const expiresAt = adminState.expiresHours ? Math.floor(Date.now() / 1000) + adminState.expiresHours * 3600 : null;
-                await env.DB.prepare('INSERT INTO coupons (code, discount_percent, plan_id, max_uses, used_count, expires_at, active, created_at) VALUES (?, ?, ?, ?, 0, ?, 1, ?)').bind(adminState.code, adminState.discountPercent, planId || null, adminState.maxUses, expiresAt, Date.now()).run();
+                await env.DB.prepare('INSERT INTO coupons (code, discount_percent, plan_id, max_uses, used_count, expires_at, active, created_at) VALUES (?, ?, ?, ?, 0, ?, 1, ?)').bind(
+                  adminState.code, adminState.discountPercent, planId || null, adminState.maxUses, expiresAt, Date.now()
+                ).run();
                 await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, `✅ <b>کد تخفیف ایجاد شد!</b>\n\n🎟 کد: <b>${adminState.code}</b>\n🎉 تخفیف: ${adminState.discountPercent}٪\n👥 حداکثر استفاده: ${adminState.maxUses || 'نامحدود'}\n⏳ انقضا: ${adminState.expiresHours ? adminState.expiresHours + ' ساعت' : 'نامحدود'}\n📦 پلن: ${planId || 'همه پلن‌ها'}`, ADM_KEY, TOKEN);
+                await sendMessage(chatId,
+                  `✅ <b>کد تخفیف ایجاد شد!</b>\n\n🎟 کد: <b>${adminState.code}</b>\n🎉 تخفیف: ${adminState.discountPercent}٪\n👥 حداکثر استفاده: ${adminState.maxUses || 'نامحدود'}\n⏳ انقضا: ${adminState.expiresHours ? adminState.expiresHours + ' ساعت' : 'نامحدود'}\n📦 پلن: ${planId || 'همه پلن‌ها'}`,
+                  ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
               }
 
@@ -2065,8 +3354,7 @@ export default {
             await env.DB.prepare('DELETE FROM queue').run();
             await env.DB.prepare('UPDATE user_state SET status=? WHERE status=?').bind('cancelled', 'processing').run();
             await finishTask(env);
-            const isDirEn = await getDirectUploadEnabled(env);
-            await sendMessage(chatId, "✅ بازنشانی شد.", buildAdminKeyboard(isDirEn), TOKEN);
+            await sendMessage(chatId, "✅ بازنشانی شد.", ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
@@ -2075,16 +3363,15 @@ export default {
             const cnt = (await env.DB.prepare('SELECT COUNT(*) as c FROM user_state WHERE status=?').bind('processing').first())?.c || 0;
             await env.DB.prepare('UPDATE user_state SET status=? WHERE status=?').bind('cancelled', 'processing').run();
             await finishTask(env);
-            const isDirEn = await getDirectUploadEnabled(env);
-            await sendMessage(chatId, `✅ ${cnt} پردازش لغو شد.`, buildAdminKeyboard(isDirEn), TOKEN);
+            await sendMessage(chatId, `✅ ${cnt} پردازش لغو شد.`, ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
           const sqMatch = text.match(/^\/startqueue (.+)$/);
-          if (sqMatch && sqMatch[1] === env.ADMIN_SECRET) { await finishTask(env); const isDirEn = await getDirectUploadEnabled(env); await sendMessage(chatId, "✅ صف راه‌اندازی شد.", buildAdminKeyboard(isDirEn), TOKEN); return new Response('OK'); }
+          if (sqMatch && sqMatch[1] === env.ADMIN_SECRET) { await finishTask(env); await sendMessage(chatId, "✅ صف راه‌اندازی شد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
 
           const rqMatch = text.match(/^\/resetqueue (.+)$/);
-          if (rqMatch && rqMatch[1] === env.ADMIN_SECRET) { await env.DB.prepare('DELETE FROM queue').run(); const isDirEn = await getDirectUploadEnabled(env); await sendMessage(chatId, "✅ صف خالی شد.", buildAdminKeyboard(isDirEn), TOKEN); return new Response('OK'); }
+          if (rqMatch && rqMatch[1] === env.ADMIN_SECRET) { await env.DB.prepare('DELETE FROM queue').run(); await sendMessage(chatId, "✅ صف خالی شد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
 
           // ---- /start ----
           if (text === '/start' || text.startsWith('/start ')) {
@@ -2095,78 +3382,59 @@ export default {
             const startParam = text.split(' ')[1] || '';
             if (startParam.startsWith('ref_')) {
               const referrerId = startParam.replace('ref_', '');
-              if (referrerId !== chatId) { await addReferral(env, referrerId, chatId, TOKEN); }
+              if (referrerId !== chatId) {
+                await addReferral(env, referrerId, chatId, TOKEN);
+              }
             }
 
             const baseStars = await getEffectiveStarsPrice(env);
             const baseUsd = await getEffectiveUsdPrice(env);
             const normalDailyFiles = await getNormalDailyFiles(env);
+            const normalDailyDirect = await getNormalDailyDirectFiles(env);
             const normalVolMB = await getNormalDailyVolumeMB(env);
             const normalSizeMB = await getNormalFileSizeLimitMB(env);
             const normalTTL = await getNormalMaxTimeSec(env);
             const proSizeMB = await getProFileSizeLimitMB(env);
             const proTTL = await getProMaxTimeSec(env);
-            const isDirectEnabled = await getDirectUploadEnabled(env);
             const normalTTLText = normalTTL >= 3600 ? `${Math.round(normalTTL / 3600)} ساعت` : `${Math.round(normalTTL / 60)} دقیقه`;
             const proTTLText = proTTL >= 86400 ? `${Math.round(proTTL / 86400)} روز` : `${Math.round(proTTL / 3600)} ساعت`;
             
-            let directUploadText = isDirectEnabled ? 
-              `1️⃣ <b>ارسال فایل مستقیم:</b> فایل خود را مستقیم اینجا بفرستید (حداکثر ۲ گیگابایت).\n` :
-              `1️⃣ <b>ارسال فایل مستقیم:</b> (در حال بهبود - فعلا از لینک مستقیم استفاده کنید).\n`;
-
             await sendMessage(chatId,
               `🌀 <b>به ربات دانلودر ملی خوش آمدید!</b>\n\n` +
-              `📌 <b>راه‌حل سریع برای دانلود با اینترنت ملی</b>\n\n` +
+              `📌 <b>ربات ملی دانلود</b> – راه‌حل سریع و آسان برای دانلود فایل‌های فیلترشده با <b>اینترنت ملی</b> و صرفه‌جویی در مصرف حجم VPN!\n\n` +
               `🔹 <b>نحوه استفاده:</b>\n` +
-              directUploadText +
-              `2️⃣ <b>یا استفاده از لینک مستقیم:</b> فایل‌های بزرگ را به ربات <b>@filesto_bot</b> بفرستید و لینکشان را اینجا ارسال کنید.\n` +
-              `3️⃣ رمز عبور دلخواه برای فایل ZIP وارد کنید و تمام!\n\n` +
-              `⭐️ <b>مزایای ویژه Pro:</b>\n` +
-              `• نگهداری تا <b>${proTTLText}</b> (عادی: ${normalTTLText})\n` +
-              `• <b>${DAILY_LIMIT_PRO} فایل</b> در روز تا حجم <b>${proSizeMB} مگابایت</b>\n` +
-              `• هزینه: ${baseStars} Stars\n\n` +
-              `🎁 با دعوت دوستان، <b>Pro رایگان</b> بگیرید!\n\n` +
-              `👇 برای شروع، فایل یا لینک خود را بفرستید.`,
+              `1️⃣ فایل خود را به ربات <b>@filesto_bot</b> فوروارد کنید.\n` +
+              `2️⃣ لینک مستقیم را در همین ربات ارسال کنید.\n` +
+              `✨ <b>جدید:</b> قابلیت ارسال مستقیم فایل به ربات اضافه شد! می‌توانید فایل را مستقیم (بدون نیاز به لینک) با سهمیه مشخص روزانه اینجا بفرستید.\n` +
+              `3️⃣ یک رمز عبور دلخواه برای فایل ZIP وارد کنید.\n` +
+              `4️⃣ منتظر بمانید تا پردازش شود و لینک دانلود (با قابلیت دانلود با اینترنت ملی) را دریافت کنید.\n` +
+              `5️⃣ پس از دانلود، حتماً روی دکمه <b>«🗑 حذف فایل من»</b> کلیک کنید تا فایل از سرور پاک شود.\n\n` +
+              `⭐️ <b>عضویت Pro</b>\n` +
+              `• فایل‌های شما تا <b>${proTTLText}</b> روی سرور می‌ماند (کاربران عادی: ${normalTTLText})\n` +
+              `• اولویت بالاتر در صف پردازش\n` +
+              `• حداکثر <b>${DAILY_LIMIT_PRO} فایل کل</b> و <b>سهمیه اختصاصی ارسال مستقیم</b> در روز (عادی: ${normalDailyFiles} فایل کل)\n` +
+              `• حداکثر <b>${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز (عادی: ${normalVolMB} مگابایت)\n` +
+              `• حداکثر حجم هر فایل: <b>${proSizeMB} مگابایت</b> (عادی: ${normalSizeMB} مگابایت)\n` +
+              `• هزینه عضویت: ${baseStars} Stars تلگرام یا معادل ${baseUsd} دلار ارز دیجیتال\n` +
+              `• برای خرید روی دکمه «⭐️ عضویت Pro» کلیک کنید.\n\n` +
+              `🎁 <b>اشتراک رایگان Pro</b>\n` +
+              `• با دعوت دوستان، اشتراک Pro رایگان یا کد تخفیف هدیه دریافت کنید!\n` +
+              `• از منوی «🎁 اشتراک رایگان Pro» لینک اختصاصی خود را بگیرید.\n\n` +
+              `⚠️ <b>هشدار امنیتی و قانونی:</b>\n` +
+              `• فایل‌ها در یک <b>مخزن عمومی GitHub</b> ذخیره می‌شوند. از ارسال فایل‌های شخصی، محرمانه، مستهجن یا خلاف قانون خودداری کنید.\n` +
+              `• <b>مسئولیت قانونی ارسال محتوای غیرمجاز بر عهده کاربر است.</b>\n` +
+              `• با استفاده از ربات، شما <b>متعهد به رعایت تمام قوانین</b> جمهوری اسلامی ایران می‌شوید.\n\n` +
+              `📊 <b>محدودیت‌های فعلی:</b>\n` +
+              `• کاربران عادی: <b>${normalDailyFiles} فایل کل (مستقیم: ${normalDailyDirect})</b> و <b>${normalVolMB} مگابایت</b> در روز | حداکثر ${normalSizeMB} مگابایت/فایل | ماندگاری ${normalTTLText}\n` +
+              `• کاربران Pro: <b>${DAILY_LIMIT_PRO} فایل کل</b> و <b>${DAILY_VOLUME_PRO_BYTES / (1024 * 1024)} مگابایت</b> در روز | حداکثر ${proSizeMB} مگابایت/فایل | ماندگاری ${proTTLText}\n\n` +
+              `❤️ <b>حمایت و پشتیبانی:</b>\n` +
+              `• کانال تلگرام: @maramidownload\n\n` +
+              `👇 با دکمه زیر شروع کنید.`,
               getMainKeyboardForAdmin(ADMIN_CHAT_ID, chatId), TOKEN);
             return new Response('OK');
           }
 
-          // ---- دریافت مستقیم فایل ----
-          const fileDoc = update.message.document || update.message.video || update.message.audio || update.message.voice;
-          if (fileDoc && !text.startsWith('/')) {
-            const isDirectEnabled = await getDirectUploadEnabled(env);
-            if (!isDirectEnabled) {
-              await sendMessage(chatId, "⚠️ این قابلیت (ارسال مستقیم) در حال بهبود است و فعلاً در دسترس نیست.\n\nلطفاً برای دانلود، فایل خود را در یک ربات واسطه (مانند <b>@filesto_bot</b>) به <b>لینک مستقیم</b> تبدیل کرده و لینک آن را ارسال کنید.", MAIN_KEYBOARD, TOKEN);
-              return new Response('OK');
-            }
-
-            const activeUserState = await dbGetUserState(env, chatId);
-            if (activeUserState?.status === 'awaiting_password') {
-              await dbDeleteUserState(env, chatId);
-              await dbRemoveFromQueue(env, chatId);
-            }
-
-            const channels = await getRequiredChannels(env);
-            if (channels.length > 0) {
-              const isMember = await isUserMemberOfChannels(chatId, channels, TOKEN);
-              if (!isMember) {
-                const jkb = { inline_keyboard: [channels.map(ch => ({ text: `🔗 @${ch}`, url: `https://t.me/${ch}` })), [colorBtn("✅ عضو شدم، بررسی کن", "check_membership", "success")]] };
-                await sendMessage(chatId, "❌ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:", jkb, TOKEN);
-                await savePendingLink(env, chatId, `tg_file_id:${fileDoc.file_id}`, fileDoc.file_size || 0);
-                return new Response('OK');
-              }
-            }
-            
-            if (fileDoc.file_size && fileDoc.file_size > 2000 * 1024 * 1024) {
-               await sendMessage(chatId, "❌ حجم این فایل بیشتر از ۲ گیگابایت است (محدودیت API تلگرام).\n\nبرای فایل‌های بزرگتر از ۲ گیگابایت، لطفاً از روش <b>لینک مستقیم</b> (ارسال فایل به ربات واسطه <b>@filesto_bot</b>) استفاده کنید.", MAIN_KEYBOARD, TOKEN);
-               return new Response('OK');
-            }
-
-            await processPendingLink(env, chatId, `tg_file_id:${fileDoc.file_id}`, fileDoc.file_size || 0, TOKEN);
-            return new Response('OK');
-          }
-
-          // ---- دریافت لینک ----
+          // ---- لینک ----
           if (text.match(/^https?:\/\//)) {
             const activeUserState = await dbGetUserState(env, chatId);
             if (activeUserState?.status === 'awaiting_password') {
@@ -2190,7 +3458,7 @@ export default {
 
           // ---- رمز عبور ----
           const userState = await dbGetUserState(env, chatId);
-          if (userState?.status === 'awaiting_password' && userState.requestData && text) {
+          if (userState?.status === 'awaiting_password' && userState.requestData) {
             const isPro = await isProUser(env, chatId);
             const isOversized = userState.requestData.oversized;
 
@@ -2202,19 +3470,20 @@ export default {
                 await dbSetUserState(env, chatId, 'processing', { url: userState.requestData.url, password: text, fileSize: userState.requestData.fileSize || 0, oversized: true });
                 runTaskWithRetry(chatId, userState.requestData.url, text, env, TOKEN).catch(console.error);
                 await sendMessage(chatId,
-                  `📤 <b>پردازش فایل شروع شد!</b>\n\n⏰ شما ${OVERSIZED_PENDING_HOURS} ساعت فرصت دارید تا اشتراک Pro تهیه کنید و لینک دانلود را دریافت کنید.\n\nبعد از خرید Pro، لینک خودکار برای شما ارسال می‌شود.`,
+                  `📤 <b>آپلود فایل شروع شد!</b>\n\n⏰ شما ${OVERSIZED_PENDING_HOURS} ساعت فرصت دارید تا اشتراک Pro تهیه کنید و لینک دانلود را دریافت کنید.\n\nبعد از خرید Pro، لینک خودکار برای شما ارسال می‌شود.`,
                   { inline_keyboard: [[colorBtn("⭐️ خرید Pro و دریافت لینک", "pro_info", "success")], [colorBtn("🗑 لغو و حذف فایل", "cancel_oversized", "danger")]] }, TOKEN);
               } else {
                 await dbAddQueue(env, chatId, userState.requestData.url, text, userState.requestData.fileSize || 0, false);
                 await dbSetUserState(env, chatId, 'waiting', { url: userState.requestData.url, password: text, fileSize: userState.requestData.fileSize || 0, oversized: true });
                 await sendMessage(chatId,
-                  `⏳ <b>در صف انتظار قرار گرفتید.</b>\n\nفایل به محض رسیدن نوبت پردازش می‌شود.\n\n⏰ شما ${OVERSIZED_PENDING_HOURS} ساعت فرصت دارید تا اشتراک Pro تهیه کنید.`,
+                  `⏳ <b>در صف انتظار قرار گرفتید.</b>\n\nفایل به محض رسیدن نوبت آپلود می‌شود.\n\n⏰ شما ${OVERSIZED_PENDING_HOURS} ساعت فرصت دارید تا اشتراک Pro تهیه کنید.`,
                   { inline_keyboard: [[colorBtn("⭐️ خرید Pro", "pro_info", "primary")], [colorBtn("🗑 لغو و حذف فایل", "cancel_oversized", "danger")]] }, TOKEN);
               }
               return new Response('OK');
             }
 
             await dbDeleteUserState(env, chatId);
+            const planInfo = isPro ? await getUserActivePlan(env, chatId) : null;
             const active = await dbGetActiveCount(env);
             if (active < MAX_CONCURRENT) {
               await dbSetUserState(env, chatId, 'processing', { url: userState.requestData.url, password: text, fileSize: userState.requestData.fileSize || 0 });
@@ -2234,9 +3503,7 @@ export default {
             return new Response('OK');
           }
 
-          if (text && !text.startsWith('/')) {
-             await sendMessage(chatId, "❌ پیام معتبر نیست.\n\nشما می‌توانید یک **فایل** را مستقیماً ارسال کنید یا **لینک دانلود** آن را بفرستید.\n\n📌 راهنما: برای دریافت لینک مستقیم، فایل خود را به <b>@filesto_bot</b> بفرستید.", MAIN_KEYBOARD, TOKEN);
-          }
+          await sendMessage(chatId, "❌ پیام معتبر نیست.\nلینک باید با http:// یا https:// شروع شود و یا فایل ارسال کنید.\n\n📌 راهنما: برای دریافت لینک مستقیم، فایل خود را به @filesto_bot بفرستید.", MAIN_KEYBOARD, TOKEN);
           return new Response('OK');
         }
 
@@ -2250,6 +3517,8 @@ export default {
 
 
 
+
+    
 
 
 
