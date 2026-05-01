@@ -33,6 +33,7 @@ const lastCallbackProcessed = new Map();
 // ---- آی‌دی ربات اصلی (واترمارک) ----
 const BOT_SIGNATURE = '\n\n🤖 <a href="https://t.me/filesmanagement_bot">@filesmanagement_bot</a>';
 
+
 // ============================================================
 // ساخت دکمه‌های رنگی بر اساس مستندات Bot API 9.6 (سال 2026)
 // ============================================================
