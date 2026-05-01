@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: 'لینک مستقیم فایل'
-        required: true
+        description: 'لینک مستقیم فایل (در صورت وجود)'
+        required: false
+        type: string
+      file_id:
+        description: 'شناسه فایل تلگرام (در صورت آپلود مستقیم)'
+        required: false
         type: string
       zip_password:
         description: 'رمز عبور ZIP'
@@ -34,22 +38,60 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install 7z
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
-
-      - name: Download file with resume support (using wget)
+      - name: Install Dependencies
         run: |
-          ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
-          if [ -z "$ORIGINAL_NAME" ]; then
-            ORIGINAL_NAME="downloaded_file"
+          sudo apt-get update && sudo apt-get install -y p7zip-full
+          pip install pyrogram tgcrypto
+
+      - name: Download file (Link OR Telegram File ID)
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          INPUT_FILE_URL: ${{ github.event.inputs.file_url }}
+          INPUT_FILE_ID: ${{ github.event.inputs.file_id }}
+        run: |
+          if [ -n "$INPUT_FILE_URL" ] && [ "$INPUT_FILE_URL" != "null" ] && [ "$INPUT_FILE_URL" != "" ]; then
+            echo "🌐 Using HTTP Link download..."
+            ORIGINAL_NAME=$(basename "$INPUT_FILE_URL" | cut -d '?' -f1)
+            [ -z "$ORIGINAL_NAME" ] && ORIGINAL_NAME="downloaded_file"
+            echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+            wget -c -t 20 -T 60 --retry-connrefused --waitretry=5 -O "$ORIGINAL_NAME" "$INPUT_FILE_URL"
+          elif [ -n "$INPUT_FILE_ID" ] && [ "$INPUT_FILE_ID" != "null" ] && [ "$INPUT_FILE_ID" != "" ]; then
+            echo "🚀 Using Direct Telegram Download via MTProto..."
+            cat << 'EOF' > dl_script.py
+          import os, asyncio
+          from pyrogram import Client
+
+          async def main():
+              api_id = int(os.environ['TG_API_ID'])
+              api_hash = os.environ['TG_API_HASH']
+              bot_token = os.environ['TG_BOT_TOKEN']
+              file_id = os.environ['INPUT_FILE_ID']
+              
+              app = Client("my_bot_session", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+              async with app:
+                  print("Connected directly to Telegram! Downloading file...")
+                  file_path = await app.download_media(file_id)
+                  if file_path:
+                      print(f"Downloaded successfully to: {file_path}")
+                      with open("filename.txt", "w") as f:
+                          f.write(file_path)
+                  else:
+                      print("❌ Download failed via Pyrogram!")
+                      exit(1)
+
+          asyncio.run(main())
+          EOF
+            python dl_script.py
+            ORIGINAL_NAME=$(cat filename.txt)
+            echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+          else
+            echo "❌ No file_url or file_id provided!"
+            exit 1
           fi
-          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
           
-          echo "Starting download of: $ORIGINAL_NAME"
-          wget -c -t 20 -T 60 --retry-connrefused --waitretry=5 -O "$ORIGINAL_NAME" "${{ github.event.inputs.file_url }}"
-          
-          # Verify file is not empty
-          if [ ! -s "$ORIGINAL_NAME" ]; then
+          if [ ! -s "${ORIGINAL_NAME:-downloaded_file}" ]; then
             echo "❌ Downloaded file is empty or missing!"
             exit 1
           fi
