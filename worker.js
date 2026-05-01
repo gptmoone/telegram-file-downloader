@@ -3287,8 +3287,7 @@ export default {
             return new Response('OK');
           }
 
-          return new Response('OK');
-        }
+          
 // ---- Pro info ----
           if (data === 'pro_info') {
             await showProPlansToUser(env, chatId, msgId, TOKEN);
