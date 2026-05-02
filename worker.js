@@ -58,6 +58,42 @@ const GITHUB_REPO = 'telegram-file-downloader';
 
 const lastCallbackProcessed = new Map();
 
+// ============================================================
+// توابع مدیریت چند ریپازیتوری گیت‌هاب
+// ============================================================
+
+async function getActiveRepositories(env) {
+  try {
+    const rows = await env.DB.prepare('SELECT * FROM github_repositories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC').all();
+    return rows.results || [];
+  } catch (e) { return []; }
+}
+
+async function getNextRepositoryRoundRobin(env) {
+  const repos = await getActiveRepositories(env);
+  if (repos.length === 0) return null;
+  let currentIndex = 0;
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'repo_round_robin_index'").first();
+    currentIndex = row ? (parseInt(row.setting_value) || 0) : 0;
+  } catch (e) {}
+  if (currentIndex >= repos.length) currentIndex = 0;
+  const selectedRepo = repos[currentIndex];
+  const nextIndex = (currentIndex + 1) % repos.length;
+  try {
+    await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('repo_round_robin_index', ?)").bind(String(nextIndex)).run();
+  } catch (e) {}
+  return selectedRepo;
+}
+
+async function getUserRepo(env, chatId) {
+  try {
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = ?").bind(`user_repo_${chatId}`).first();
+    if (row && row.setting_value) return JSON.parse(row.setting_value);
+  } catch (e) {}
+  return { owner: GITHUB_OWNER, repo: GITHUB_REPO, ghToken: null };
+}
+
 // ---- آی‌دی ربات اصلی (واترمارک) ----
 
 const BOT_SIGNATURE = '\n\n🤖 <a href="https://t.me/filesmanagement_bot">@filesmanagement_bot</a>';
@@ -145,6 +181,7 @@ function buildAdminKeyboard() {
       [colorBtn("👥 اعضای Pro", "admin_pro_members_page:1", "blue"), colorBtn("🔔 تخفیف تمدید", "admin_renewal_discount", "blue")],
 
       [colorBtn("🎟 مدیریت کدهای تخفیف", "admin_coupon_menu", "green"), colorBtn("🔗 تنظیمات رفرال", "admin_referral_settings", "blue")],
+
       [colorBtn("🏦 تنظیمات درگاه ریالی", "admin_rial_settings", "blue"), colorBtn("🐙 مدیریت ریپازیتوری‌ها", "admin_repos_menu", "blue")],
 
       [colorBtn("📈 آمار رفرال‌ها", "admin_referral_stats", "blue"), colorBtn("🔴 حالت بروزرسانی", "admin_maintenance_toggle", "danger")],
@@ -243,84 +280,6 @@ async function answerCallback(callbackId, TOKEN) {
 
   } catch (e) { }
 
-}
-
-// ============================================================
-// توابع درگاه پرداخت ریالی Tetra98
-// ============================================================
-
-async function isRialPaymentEnabled(env) {
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'rial_payment_enabled'").first();
-    return row ? row.setting_value === '1' : false;
-  } catch (e) { return false; }
-}
-
-async function getTetra98ApiKey(env) {
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'tetra98_api_key'").first();
-    return row ? row.setting_value : '5b35ac6a72911b1abca2daf772bec697';
-  } catch (e) { return '5b35ac6a72911b1abca2daf772bec697'; }
-}
-
-async function createTetra98Order(env, chatId, rialAmount, planId, isRenewal = false) {
-  try {
-    const apiKey = await getTetra98ApiKey(env);
-    const hashId = `rial_${chatId}_${planId || 0}_${Date.now()}`;
-    const workerUrl = 'https://telegram-file-bot.gptmoone.workers.dev';
-    const body = { ApiKey: apiKey, Hash_id: hashId, Amount: rialAmount, Description: isRenewal ? 'تمدید اشتراک Pro' : 'اشتراک Pro', Email: 'user@example.com', Mobile: '09120000000', CallbackURL: `${workerUrl}/api/tetra98-callback` };
-    const res = await fetch('https://tetra98.com/api/create_order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const data = await res.json();
-    if (data.status === '100' && data.payment_url_web) {
-      return { success: true, paymentUrl: data.payment_url_web, hashId, authority: data.Authority, trackingId: data.tracking_id };
-    }
-    return { success: false };
-  } catch (e) { return { success: false }; }
-}
-
-async function verifyTetra98Payment(env, authority) {
-  try {
-    const apiKey = await getTetra98ApiKey(env);
-    const res = await fetch('https://tetra98.com/api/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ApiKey: apiKey, authority }) });
-    const data = await res.json();
-    return data.status === '100';
-  } catch (e) { return false; }
-}
-
-// ============================================================
-// توابع مدیریت چند ریپازیتوری گیت‌هاب
-// ============================================================
-
-async function getActiveRepositories(env) {
-  try {
-    const rows = await env.DB.prepare('SELECT * FROM github_repositories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC').all();
-    return rows.results || [];
-  } catch (e) { return []; }
-}
-
-async function getNextRepositoryRoundRobin(env) {
-  const repos = await getActiveRepositories(env);
-  if (repos.length === 0) return null;
-  let currentIndex = 0;
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'repo_round_robin_index'").first();
-    currentIndex = row ? (parseInt(row.setting_value) || 0) : 0;
-  } catch (e) {}
-  if (currentIndex >= repos.length) currentIndex = 0;
-  const selectedRepo = repos[currentIndex];
-  const nextIndex = (currentIndex + 1) % repos.length;
-  try {
-    await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('repo_round_robin_index', ?)").bind(String(nextIndex)).run();
-  } catch (e) {}
-  return selectedRepo;
-}
-
-async function getUserRepo(env, chatId) {
-  try {
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = ?").bind(`user_repo_${chatId}`).first();
-    if (row && row.setting_value) return JSON.parse(row.setting_value);
-  } catch (e) {}
-  return { owner: GITHUB_OWNER, repo: GITHUB_REPO, ghToken: null };
 }
 
 async function getRepoSize(env) {
@@ -603,7 +562,7 @@ async function getBotSettings(env) {
 
     return settings;
 
-  } catch (e) { return {}; }
+  } catch { return {}; }
 
 }
 
@@ -625,7 +584,7 @@ async function getDirectUploadEnabled(env) {
 
     return row ? row.setting_value === '1' : true;
 
-  } catch (e) { return true; }
+  } catch { return true; }
 
 }
 
@@ -637,7 +596,7 @@ async function getNormalDailyDirectFiles(env) {
 
     return row ? parseInt(row.setting_value) : 1;
 
-  } catch (e) { return 1; }
+  } catch { return 1; }
 
 }
 
@@ -649,7 +608,7 @@ async function getEffectiveStarsPrice(env) {
 
     return row ? parseInt(row.setting_value) : STARS_AMOUNT;
 
-  } catch (e) { return STARS_AMOUNT; }
+  } catch { return STARS_AMOUNT; }
 
 }
 
@@ -661,7 +620,7 @@ async function getEffectiveUsdPrice(env) {
 
     return row ? parseFloat(row.setting_value) : USD_AMOUNT;
 
-  } catch (e) { return USD_AMOUNT; }
+  } catch { return USD_AMOUNT; }
 
 }
 
@@ -673,7 +632,7 @@ async function getMaintenanceMode(env) {
 
     return row?.setting_value === '1';
 
-  } catch (e) { return false; }
+  } catch { return false; }
 
 }
 
@@ -687,7 +646,7 @@ async function getMaintenanceExceptions(env) {
 
     return JSON.parse(row.setting_value);
 
-  } catch (e) { return []; }
+  } catch { return []; }
 
 }
 
@@ -699,7 +658,7 @@ async function getNormalFileSizeLimitMB(env) {
 
     return row ? parseInt(row.setting_value) : 200;
 
-  } catch (e) { return 200; }
+  } catch { return 200; }
 
 }
 
@@ -711,7 +670,7 @@ async function getProFileSizeLimitMB(env) {
 
     return row ? parseInt(row.setting_value) : 2048;
 
-  } catch (e) { return 2048; }
+  } catch { return 2048; }
 
 }
 
@@ -723,7 +682,7 @@ async function getNormalMaxTimeSec(env) {
 
     return row ? parseInt(row.setting_value) : TTL_NORMAL;
 
-  } catch (e) { return TTL_NORMAL; }
+  } catch { return TTL_NORMAL; }
 
 }
 
@@ -735,7 +694,7 @@ async function getProMaxTimeSec(env) {
 
     return row ? parseInt(row.setting_value) : TTL_PRO;
 
-  } catch (e) { return TTL_PRO; }
+  } catch { return TTL_PRO; }
 
 }
 
@@ -747,7 +706,7 @@ async function getNormalDailyFiles(env) {
 
     return row ? parseInt(row.setting_value) : DAILY_LIMIT_NORMAL;
 
-  } catch (e) { return DAILY_LIMIT_NORMAL; }
+  } catch { return DAILY_LIMIT_NORMAL; }
 
 }
 
@@ -759,7 +718,7 @@ async function getNormalDailyVolumeMB(env) {
 
     return row ? parseInt(row.setting_value) : NORMAL_DAILY_VOLUME_MB;
 
-  } catch (e) { return NORMAL_DAILY_VOLUME_MB; }
+  } catch { return NORMAL_DAILY_VOLUME_MB; }
 
 }
 
@@ -771,7 +730,7 @@ async function getRenewalDiscountPercent(env) {
 
     return row ? parseFloat(row.setting_value) : 0;
 
-  } catch (e) { return 0; }
+  } catch { return 0; }
 
 }
 
@@ -783,7 +742,7 @@ async function getRenewalNotifyHours(env) {
 
     return row ? parseInt(row.setting_value) : 48;
 
-  } catch (e) { return 48; }
+  } catch { return 48; }
 
 }
 
@@ -821,7 +780,7 @@ async function getReferralSettings(env) {
 
     };
 
-  } catch (e) { return { enabled: true, referral_buy_bonus_enabled: false, referral_buy_bonus_plan_id: null, tiers: [] }; }
+  } catch { return { enabled: true, referral_buy_bonus_enabled: false, referral_buy_bonus_plan_id: null, tiers: [] }; }
 
 }
 
@@ -841,7 +800,7 @@ async function getReferralCount(env, chatId) {
 
     return row?.cnt || 0;
 
-  } catch (e) { return 0; }
+  } catch { return 0; }
 
 }
 
@@ -1135,7 +1094,7 @@ async function getCouponByCode(env, code) {
 
     return row || null;
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
@@ -1319,7 +1278,7 @@ async function getRequiredChannels(env) {
 
     return JSON.parse(row.channels);
 
-  } catch (e) { return []; }
+  } catch { return []; }
 
 }
 
@@ -1345,7 +1304,7 @@ async function isUserMemberOfChannels(chatId, channels, TOKEN) {
 
       if (!data.ok || !data.result || !['member', 'creator', 'administrator'].includes(data.result.status)) return false;
 
-    } catch (e) { return false; }
+    } catch { return false; }
 
   }
 
@@ -1405,7 +1364,7 @@ async function getProPlans(env) {
 
     return rows.results || [];
 
-  } catch (e) { return []; }
+  } catch { return []; }
 
 }
 
@@ -1417,7 +1376,7 @@ async function getAllProPlans(env) {
 
     return rows.results || [];
 
-  } catch (e) { return []; }
+  } catch { return []; }
 
 }
 
@@ -1429,7 +1388,7 @@ async function getProPlanById(env, planId) {
 
     return row || null;
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
@@ -1443,7 +1402,7 @@ async function getUserActivePlan(env, chatId) {
 
     return JSON.parse(row.plan_snapshot);
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
@@ -1457,7 +1416,7 @@ async function getPlanDiscountForPlan(env, planId) {
 
     return row || null;
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
@@ -1672,7 +1631,7 @@ async function getDiscountSettings(env) {
 
     return { starsPrice: row.stars_price, usdPrice: row.usd_price, expiresAt: row.expires_at };
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
@@ -1716,7 +1675,113 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD, planId, isRenewa
 
     return data.invoice_url ? { success: true, invoiceUrl: data.invoice_url, orderId } : { success: false };
 
-  } catch (e) { return { success: false }; }
+  } catch { return { success: false }; }
+
+}
+
+// ============================================================
+
+// توابع درگاه پرداخت ریالی Tetra98
+
+// ============================================================
+
+async function isRialPaymentEnabled(env) {
+
+  try {
+
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'rial_payment_enabled'").first();
+
+    return row ? row.setting_value === '1' : false;
+
+  } catch { return false; }
+
+}
+
+async function getTetra98ApiKey(env) {
+
+  try {
+
+    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'tetra98_api_key'").first();
+
+    return row ? row.setting_value : '5b35ac6a72911b1abca2daf772bec697';
+
+  } catch { return '5b35ac6a72911b1abca2daf772bec697'; }
+
+}
+
+async function createTetra98Order(env, chatId, rialAmount, planId, isRenewal = false) {
+
+  try {
+
+    const apiKey = await getTetra98ApiKey(env);
+
+    const hashId = `rial_${chatId}_${planId || 0}_${Date.now()}`;
+
+    const workerUrl = env.WORKER_URL || 'https://telegram-file-bot.gptmoone.workers.dev';
+
+    const body = {
+
+      ApiKey: apiKey,
+
+      Hash_id: hashId,
+
+      Amount: rialAmount,
+
+      Description: isRenewal ? 'تمدید اشتراک Pro' : 'اشتراک Pro',
+
+      Email: 'user@example.com',
+
+      Mobile: '09120000000',
+
+      CallbackURL: `${workerUrl}/api/tetra98-callback`
+
+    };
+
+    const res = await fetch('https://tetra98.com/api/create_order', {
+
+      method: 'POST',
+
+      headers: { 'Content-Type': 'application/json' },
+
+      body: JSON.stringify(body)
+
+    });
+
+    const data = await res.json();
+
+    if (data.status === '100' && data.payment_url_web) {
+
+      return { success: true, paymentUrl: data.payment_url_web, hashId, authority: data.Authority, trackingId: data.tracking_id };
+
+    }
+
+    return { success: false };
+
+  } catch { return { success: false }; }
+
+}
+
+async function verifyTetra98Payment(env, authority) {
+
+  try {
+
+    const apiKey = await getTetra98ApiKey(env);
+
+    const res = await fetch('https://tetra98.com/api/verify', {
+
+      method: 'POST',
+
+      headers: { 'Content-Type': 'application/json' },
+
+      body: JSON.stringify({ ApiKey: apiKey, authority })
+
+    });
+
+    const data = await res.json();
+
+    return data.status === '100';
+
+  } catch { return false; }
 
 }
 
@@ -1740,7 +1805,7 @@ async function createStarsInvoiceLink(env, chatId, starsAmount, planId, isRenewa
 
     return data.ok ? { success: true, invoiceLink: data.result, payload } : { success: false };
 
-  } catch (e) { return { success: false }; }
+  } catch { return { success: false }; }
 
 }
 
@@ -1762,22 +1827,17 @@ async function getFileSize(url) {
 
     return s ? parseInt(s) : null; 
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
-async function getBranchTotalSize(env, branchName, chatId) {
+async function getBranchTotalSize(env, branchName) {
 
   try {
 
-    const userRepo = chatId ? await getUserRepo(env, chatId) : null;
-    const owner = (userRepo && userRepo.owner) ? userRepo.owner : GITHUB_OWNER;
-    const repo = (userRepo && userRepo.repo) ? userRepo.repo : GITHUB_REPO;
-    const token = (userRepo && userRepo.ghToken) ? userRepo.ghToken : env.GH_TOKEN;
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/trees/${branchName}?recursive=1`, {
 
-    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branchName}?recursive=1`, {
-
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+      headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
 
     });
 
@@ -1787,28 +1847,23 @@ async function getBranchTotalSize(env, branchName, chatId) {
 
     return (data.tree || []).filter(i => i.type === 'blob').reduce((s, i) => s + (i.size || 0), 0);
 
-  } catch (e) { return null; }
+  } catch { return null; }
 
 }
 
-async function deleteBranchFromGitHub(env, branchName, chatId) {
+async function deleteBranchFromGitHub(env, branchName) {
 
   try {
 
-    const userRepo = chatId ? await getUserRepo(env, chatId) : null;
-    const owner = (userRepo && userRepo.owner) ? userRepo.owner : GITHUB_OWNER;
-    const repo = (userRepo && userRepo.repo) ? userRepo.repo : GITHUB_REPO;
-    const token = (userRepo && userRepo.ghToken) ? userRepo.ghToken : env.GH_TOKEN;
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branchName}`, {
 
-    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branchName}`, {
-
-      method: 'DELETE', headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+      method: 'DELETE', headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
 
     });
 
     return res.ok || res.status === 404;
 
-  } catch (e) { return false; }
+  } catch { return false; }
 
 }
 
@@ -1818,7 +1873,7 @@ async function deleteUserBranch(env, chatId) {
 
   if (lastBranch) { 
 
-      await deleteBranchFromGitHub(env, lastBranch, chatId);
+      await deleteBranchFromGitHub(env, lastBranch);
 
       await dbRemoveActiveBranch(env, lastBranch); 
 
@@ -2010,7 +2065,7 @@ async function startBroadcast(env, adminChatId, messageText, TOKEN) {
 
         rd.ok ? sent++ : fail++;
 
-      } catch (e) { fail++; }
+      } catch { fail++; }
 
     }));
 
@@ -2120,7 +2175,7 @@ async function sendRenewalNotifications(env, TOKEN) {
 
           }
 
-        } catch (e) {}
+        } catch {}
 
       }
 
@@ -2146,11 +2201,33 @@ async function sendRenewalNotifications(env, TOKEN) {
 
         if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$ (${renewalDiscount}٪ تخفیف)`, url: usdInv.invoiceUrl }]);
 
+        const rialEnabledR = await isRialPaymentEnabled(env);
+
+        if (rialEnabledR && plan && plan.rial_price > 0) {
+
+          const rialR = Math.round(plan.rial_price * (1 - renewalDiscount / 100));
+
+          const rialOrderR = await createTetra98Order(env, chatId, rialR, plan?.id, true);
+
+          if (rialOrderR.success) rows.push([{ text: `🏦 تمدید ریالی — ${rialR.toLocaleString('fa-IR')} تومان (${renewalDiscount}٪ تخفیف)`, url: rialOrderR.paymentUrl }]);
+
+        }
+
       } else {
 
         if (starsInv.success) rows.push([{ text: `⭐️ تمدید با Stars — ${starsPrice}`, url: starsInv.invoiceLink }]);
 
         if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$`, url: usdInv.invoiceUrl }]);
+
+        const rialEnabledR2 = await isRialPaymentEnabled(env);
+
+        if (rialEnabledR2 && plan && plan.rial_price > 0) {
+
+          const rialOrderR2 = await createTetra98Order(env, chatId, plan.rial_price, plan?.id, true);
+
+          if (rialOrderR2.success) rows.push([{ text: `🏦 تمدید ریالی — ${plan.rial_price.toLocaleString('fa-IR')} تومان`, url: rialOrderR2.paymentUrl }]);
+
+        }
 
       }
 
@@ -2226,27 +2303,23 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
 
     }
 
-    // انتخاب ریپازیتوری با round-robin
+    // انتخاب ریپازیتوری: اگه دیتابیس ریپو داره round-robin، وگرنه پیش‌فرض
+    let owner = GITHUB_OWNER;
+    let repo = GITHUB_REPO;
+    let ghToken = env.GH_TOKEN;
+
     const activeRepos = await getActiveRepositories(env);
-    let owner, repo, ghToken;
     if (activeRepos.length > 0) {
       const selectedRepo = await getNextRepositoryRoundRobin(env);
       if (selectedRepo) {
         owner = selectedRepo.owner;
         repo = selectedRepo.repo;
         ghToken = selectedRepo.gh_token || env.GH_TOKEN;
+        // ذخیره ریپوی انتخابی برای این کاربر (برای ساخت لینک نهایی)
         try {
-          await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)").bind(`user_repo_${chatId}`, JSON.stringify({ owner, repo, repoId: selectedRepo.id, ghToken })).run();
+          await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)").bind(`user_repo_${chatId}`, JSON.stringify({ owner, repo, ghToken })).run();
         } catch (e) {}
-      } else {
-        owner = GITHUB_OWNER;
-        repo = GITHUB_REPO;
-        ghToken = env.GH_TOKEN;
       }
-    } else {
-      owner = GITHUB_OWNER;
-      repo = GITHUB_REPO;
-      ghToken = env.GH_TOKEN;
     }
 
     const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/workflows/download.yml/dispatches`, {
@@ -2258,23 +2331,17 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
     });
 
     if (!res.ok) {
-      let errBody = '';
-      try { errBody = await res.text(); } catch(e2) {}
-      console.error(`GitHub dispatch failed: HTTP ${res.status} for ${owner}/${repo} - ${errBody}`);
-    } else {
-      console.log(`GitHub dispatch OK for ${owner}/${repo}, user=${userId}`);
+      const errBody = await res.text().catch(() => '');
+      console.error(`GitHub dispatch HTTP ${res.status} for ${owner}/${repo}: ${errBody}`);
     }
 
     return res.ok;
 
-  } catch (e) { console.error('sendWorkflowRequest exception:', String(e)); return false; }
+  } catch (e) { console.error('sendWorkflowRequest error:', String(e)); return false; }
 
 }
 
 async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
-
-  // Cloudflare Workers stateless: فقط dispatch کن و برگرد
-  // نتیجه از طریق callback /api/complete یا /api/failed دریافت میشه
 
   const userId = `${chatId}_${Date.now()}`;
 
@@ -2288,8 +2355,7 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
         await sendSimple(chatId, `⚠️ تلاش ${r + 1} ناموفق. تلاش مجدد...`, TOKEN);
 
-        // در Workers نمیتوانیم 30 ثانیه صبر کنیم - فقط یک بار retry میکنیم
-        await new Promise(x => setTimeout(x, 2000));
+        await new Promise(x => setTimeout(x, RETRY_INTERVAL)); 
 
     }
 
@@ -2297,9 +2363,7 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
   if (!sent) { 
 
-      await sendSimple(chatId, "❌ ارسال به GitHub شکست خورد. دوباره فایل را بفرستید.", TOKEN);
-
-      await dbDeleteUserState(env, chatId);
+      await sendSimple(chatId, "❌ ارسال به GitHub شکست خورد.", TOKEN);
 
       await finishTask(env); 
 
@@ -2307,10 +2371,33 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
   }
 
-  // dispatch موفق بود - فقط پیام منتظر باشید بده و تمام
-  // GitHub Actions وقتی شروع کرد /api/started صدا میزنه
-  // وقتی تموم کرد /api/complete صدا میزنه
-  // نیازی به polling نیست
+  let started = false;
+
+  for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
+
+    await new Promise(x => setTimeout(x, START_WAIT_INTERVAL));
+
+    const st = await dbGetUserState(env, chatId);
+
+    if (st?.startedAt) { started = true; break; }
+
+  }
+
+  if (!started) await sendSimple(chatId, "⚠️ پردازش شروع نشد. با «وضعیت من» پیگیری کنید.", TOKEN);
+
+  for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
+
+    await new Promise(x => setTimeout(x, WAIT_INTERVAL));
+
+    const st = await dbGetUserState(env, chatId);
+
+    if (st?.branchName) return;
+
+  }
+
+  await sendSimple(chatId, "❌ زمان انتظار تمام شد. با «وضعیت من» بررسی کنید.", TOKEN);
+
+  await finishTask(env);
 
 }
 
@@ -2444,7 +2531,15 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
 
     for (const plan of plans.slice(0, 3)) {
 
-      planRows.push([{ text: `⭐️ ${plan.name} — ${plan.stars_price} Stars`, callback_data: `buy_plan_stars:${plan.id}` }, { text: `💰 ${plan.usd_price}$`, callback_data: `buy_plan_usd:${plan.id}` }]);
+      const rialEnabledQ = await isRialPaymentEnabled(env);
+
+      const rialPriceQ = plan.rial_price || 0;
+
+      const qRow = [{ text: `⭐️ ${plan.name} — ${plan.stars_price} Stars`, callback_data: `buy_plan_stars:${plan.id}` }, { text: `💰 ${plan.usd_price}$`, callback_data: `buy_plan_usd:${plan.id}` }];
+
+      if (rialEnabledQ && rialPriceQ > 0) qRow.splice(1, 0, { text: `🏦 ${rialPriceQ.toLocaleString('fa-IR')} تومان`, callback_data: `buy_plan_rial:${plan.id}` });
+
+      planRows.push(qRow);
 
     }
 
@@ -2510,7 +2605,7 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
 
       try { const ps = JSON.parse(row.plan_snapshot);
 
-      planName = ps.name || 'استاندارد'; } catch (e) {}
+      planName = ps.name || 'استاندارد'; } catch {}
 
     }
 
@@ -2644,21 +2739,33 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
 
       msg += `   📁 ${plan.daily_files} کل | 🚀 ${plan.daily_direct_files} مستقیم/روز | 💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n`;
 
-      msg += `   💰 ${plan.stars_price} Stars | ${plan.usd_price}$\n\n`;
+      const rialMsgPrice = plan.rial_price || 0;
+
+      msg += `   💰 ${plan.stars_price} Stars | ${plan.usd_price}$${rialMsgPrice > 0 ? ` | 🏦 ${rialMsgPrice.toLocaleString('fa-IR')} تومان` : ''}\n\n`;
 
     }
 
-    const rialEnabledP = await isRialPaymentEnabled(env);
-    const rialPriceP = plan.rial_price || 0;
-    const planRowP = [
-        colorBtn(`${planDiscount ? '🎉' : '⭐️'} ${plan.name} — ${starsPrice} Stars`, `buy_plan_stars:${plan.id}`, "primary"),
+    const rialEnabled5 = await isRialPaymentEnabled(env);
+
+    const rialPrice5 = plan.rial_price || 0;
+
+    const planRow5 = [
+
+        colorBtn(`${planDiscount ? '🎉' : '⭐️'} ${plan.name} — ${starsPrice} Stars`, `buy_plan_stars:${plan.id}`, "primary"), 
+
         colorBtn(`💰 ${usdPrice}$`, `buy_plan_usd:${plan.id}`, "success")
+
     ];
-    if (rialEnabledP && rialPriceP > 0) {
-      const discRialP = planDiscount ? Math.round(rialPriceP * (1 - planDiscount.discount_percent / 100)) : rialPriceP;
-      planRowP.splice(1, 0, colorBtn(`🏦 ${discRialP.toLocaleString('fa-IR')} تومان`, `buy_plan_rial:${plan.id}`, "success"));
+
+    if (rialEnabled5 && rialPrice5 > 0) {
+
+      const discRial5 = planDiscount ? Math.round(rialPrice5 * (1 - planDiscount.discount_percent / 100)) : rialPrice5;
+
+      planRow5.splice(1, 0, colorBtn(`🏦 ${discRial5.toLocaleString('fa-IR')} تومان`, `buy_plan_rial:${plan.id}`, "success"));
+
     }
-    rows.push(planRowP);
+
+    rows.push(planRow5);
 
   }
 
@@ -2702,29 +2809,29 @@ async function ensureTables(env) {
 
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS coupon_uses (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, chat_id TEXT NOT NULL, used_at INTEGER, UNIQUE(code, chat_id))`).run();
 
+  try { await env.DB.prepare(`CREATE TABLE IF NOT EXISTS github_repositories (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, repo TEXT NOT NULL, gh_token TEXT NOT NULL, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0, created_at INTEGER)`).run(); } catch (e) {}
+
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (chat_id TEXT PRIMARY KEY, first_seen INTEGER, name TEXT)`).run();
 
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_limits (chat_id TEXT PRIMARY KEY, file_count INTEGER DEFAULT 0, direct_file_count INTEGER DEFAULT 0, reset_date INTEGER, daily_volume_bytes INTEGER)`).run();
 
   
 
-  try { await env.DB.prepare(`ALTER TABLE pro_users ADD COLUMN plan_snapshot TEXT`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE pro_users ADD COLUMN plan_snapshot TEXT`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN max_file_size_mb INTEGER DEFAULT 2048`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN max_file_size_mb INTEGER DEFAULT 2048`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN daily_direct_files INTEGER DEFAULT 3`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN daily_direct_files INTEGER DEFAULT 3`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN password TEXT`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN password TEXT`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN branch_name TEXT`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN branch_name TEXT`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN name TEXT`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN name TEXT`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE daily_limits ADD COLUMN direct_file_count INTEGER DEFAULT 0`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE daily_limits ADD COLUMN direct_file_count INTEGER DEFAULT 0`).run(); } catch {}
 
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN rial_price INTEGER DEFAULT 0`).run(); } catch (e) {}
-
-  try { await env.DB.prepare(`CREATE TABLE IF NOT EXISTS github_repositories (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, repo TEXT NOT NULL, gh_token TEXT NOT NULL, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0, created_at INTEGER)`).run(); } catch (e) {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN rial_price INTEGER DEFAULT 0`).run(); } catch {}
 
 }
 
@@ -2792,17 +2899,15 @@ export default {
 
         const now = Math.floor(Date.now() / 1000);
 
-        const expired = await env.DB.prepare('SELECT branch_name, chat_id FROM active_branches WHERE expires_at <= ?').bind(now).all();
+        const expired = await env.DB.prepare('SELECT branch_name FROM active_branches WHERE expires_at <= ?').bind(now).all();
 
         let deleted = 0;
 
         for (const b of expired.results) { 
 
-            if (await deleteBranchFromGitHub(env, b.branch_name, b.chat_id)) { 
+            if (await deleteBranchFromGitHub(env, b.branch_name)) { 
 
-                await dbRemoveActiveBranch(env, b.branch_name);
-
-                try { await env.DB.prepare("DELETE FROM bot_settings WHERE setting_key = ?").bind(`user_repo_${b.chat_id}`).run(); } catch (e) {}
+                await dbRemoveActiveBranch(env, b.branch_name); 
 
                 deleted++;
 
@@ -2836,7 +2941,7 @@ export default {
 
         return new Response(JSON.stringify({ deleted }), { headers: { 'Content-Type': 'application/json' } });
 
-      } catch (e) { return new Response('Error', { status: 500 }); }
+      } catch { return new Response('Error', { status: 500 }); }
 
     }
 
@@ -2860,27 +2965,46 @@ export default {
 
         return new Response('OK');
 
-      } catch (e) { return new Response('Error', { status: 500 }); }
+      } catch { return new Response('Error', { status: 500 }); }
 
     }
 
     if (path === '/api/tetra98-callback' && request.method === 'POST') {
+
       try {
+
         const body = await request.json();
+
         if (body.status === '100' && body.authority) {
+
           const verified = await verifyTetra98Payment(env, body.authority);
+
           if (verified) {
+
+            // hash_id format: rial_{chatId}_{planId}_{timestamp}
+
             const hashId = body.hash_id || '';
+
             const parts = hashId.split('_');
+
             const chatId = parts[1];
+
             const planId = parts[2] && !isNaN(parts[2]) && parts[2] !== '0' ? parseInt(parts[2]) : null;
+
             if (chatId) {
+
               await activateProSubscription(env, chatId, `tetra98_${body.authority}`, 'پرداخت ریالی', TOKEN, planId);
+
             }
+
           }
+
         }
+
         return new Response('OK');
-      } catch (e) { return new Response('Error', { status: 500 }); }
+
+      } catch { return new Response('Error', { status: 500 }); }
+
     }
 
     if (path === '/api/started' && request.method === 'POST') {
@@ -2901,7 +3025,7 @@ export default {
 
         return new Response('OK');
 
-      } catch (e) { return new Response('OK'); }
+      } catch { return new Response('OK'); }
 
     }
 
@@ -2923,7 +3047,7 @@ export default {
 
         return new Response('OK');
 
-      } catch (e) { return new Response('OK'); }
+      } catch { return new Response('OK'); }
 
     }
 
@@ -2941,7 +3065,7 @@ export default {
 
         const planInfo = isPro ? await getUserActivePlan(env, chatId) : null;
 
-        const totalSizeBytes = await getBranchTotalSize(env, branch, chatId) || 0;
+        const totalSizeBytes = await getBranchTotalSize(env, branch) || 0;
 
         const oversizedRow = await env.DB.prepare('SELECT file_url, file_size, password, created_at FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
 
@@ -2995,10 +3119,10 @@ export default {
 
             let password = oversizedRow.password || '';
 
-            if (reqRow?.request_data) { try { const rd = JSON.parse(reqRow.request_data); password = rd.password || password; } catch (e) {} }
+            if (reqRow?.request_data) { try { const rd = JSON.parse(reqRow.request_data); password = rd.password || password; } catch {} }
 
-            const userRepoOvs2 = await getUserRepo(env, chatId);
-            const link = `https://github.com/${userRepoOvs2.owner}/${userRepoOvs2.repo}/archive/${branch}.zip`;
+            const userRepo1 = await getUserRepo(env, chatId);
+            const link = `https://github.com/${userRepo1.owner}/${userRepo1.repo}/archive/${branch}.zip`;
 
             const quotaText = await getRemainingQuotaText(env, chatId, true, planInfo);
 
@@ -3078,7 +3202,7 @@ export default {
 
              isDirect = rd.url && rd.url.startsWith('tg_file_id:');
 
-           } catch (e) {} 
+           } catch {} 
 
         }
 
@@ -3090,8 +3214,8 @@ export default {
 
         
 
-        const userRepoMain = await getUserRepo(env, chatId);
-        const link = `https://github.com/${userRepoMain.owner}/${userRepoMain.repo}/archive/${branch}.zip`;
+        const userRepo2 = await getUserRepo(env, chatId);
+        const link = `https://github.com/${userRepo2.owner}/${userRepo2.repo}/archive/${branch}.zip`;
 
         const quotaText = await getRemainingQuotaText(env, chatId, isPro, planInfo);
 
@@ -3135,7 +3259,7 @@ export default {
 
         return new Response('OK');
 
-      } catch (e) { return new Response('OK'); }
+      } catch { return new Response('OK'); }
 
     }
 
@@ -3157,7 +3281,7 @@ export default {
 
         return new Response('OK');
 
-      } catch (e) { return new Response('OK'); }
+      } catch { return new Response('OK'); }
 
     }
 
@@ -3213,9 +3337,7 @@ export default {
 
                 await sendMessage(reqChatId, "🔧 <b>ربات در حال بروزرسانی است</b>\n\nلطفاً چند دقیقه صبر کنید و دوباره تلاش کنید.\n\nبه زودی بازخواهیم گشت! 🚀", MAIN_KEYBOARD, TOKEN);
 
-                return new Response('OK');
-
-              } else if (update.message) {
+              } else if (update.message?.text && update.message.text !== '/start') {
 
                 await sendMessage(reqChatId, "🔧 <b>ربات در حال بروزرسانی است</b>\n\nلطفاً چند دقیقه صبر کنید و دوباره تلاش کنید.\n\nبه زودی بازخواهیم گشت! 🚀", MAIN_KEYBOARD, TOKEN);
 
@@ -3780,40 +3902,66 @@ export default {
           // ---- تنظیمات رفرال (ادمین) ----
 
           if (data === 'admin_rial_settings') {
+
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+
             const rialEnabled = await isRialPaymentEnabled(env);
+
             const apiKey = await getTetra98ApiKey(env);
+
             const maskedKey = apiKey.length > 8 ? apiKey.substring(0, 4) + '****' + apiKey.substring(apiKey.length - 4) : '****';
+
             const kb = { inline_keyboard: [
-              [colorBtn(rialEnabled ? '✅ درگاه ریالی: فعال — غیرفعال کن' : '❌ درگاه ریالی: غیرفعال — فعال کن', 'admin_rial_toggle', rialEnabled ? 'success' : 'danger')],
+
+              [colorBtn(rialEnabled ? '✅ درگاه ریالی: فعال — کلیک برای غیرفعال' : '❌ درگاه ریالی: غیرفعال — کلیک برای فعال', 'admin_rial_toggle', rialEnabled ? 'success' : 'danger')],
+
               [colorBtn('🔑 تغییر API Key', 'admin_rial_set_apikey', 'blue')],
+
               [colorBtn('🔙 بازگشت', 'back_to_admin', 'danger')]
+
             ]};
-            await editMessage(chatId, msgId, `🏦 <b>تنظیمات درگاه پرداخت ریالی Tetra98</b>\n\n🔘 وضعیت: ${rialEnabled ? '✅ فعال' : '❌ غیرفعال'}\n🔑 API Key: <code>${maskedKey}</code>`, kb, TOKEN);
+
+            await editMessage(chatId, msgId, `🏦 <b>تنظیمات درگاه پرداخت ریالی Tetra98</b>\n\n🔘 وضعیت: ${rialEnabled ? '✅ فعال' : '❌ غیرفعال'}\n🔑 API Key: <code>${maskedKey}</code>\n\nبرای تنظیم قیمت ریالی هر پلن، از منوی «👑 مدیریت پلن‌های Pro» استفاده کنید.`, kb, TOKEN);
+
             return new Response('OK');
+
           }
 
           if (data === 'admin_rial_toggle') {
+
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+
             const current = await isRialPaymentEnabled(env);
+
             await env.DB.prepare('INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)').bind('rial_payment_enabled', current ? '0' : '1').run();
-            await editMessage(chatId, msgId, `✅ درگاه پرداخت ریالی ${!current ? 'فعال' : 'غیرفعال'} شد.`, buildAdminKeyboard(), TOKEN);
+
+            const newStatus = !current;
+
+            await editMessage(chatId, msgId, `✅ درگاه پرداخت ریالی ${newStatus ? 'فعال' : 'غیرفعال'} شد.`, buildAdminKeyboard(), TOKEN);
+
             return new Response('OK');
+
           }
 
           if (data === 'admin_rial_set_apikey') {
+
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
+
             await dbSetAdminState(env, chatId, { step: 'awaiting_rial_api_key' });
-            await editMessage(chatId, msgId, `🔑 API Key جدید درگاه Tetra98 را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
+
+            await editMessage(chatId, msgId, `🔑 <b>تغییر API Key درگاه Tetra98</b>\n\nAPI Key فعلی خود را از پنل Tetra98 دریافت کنید.\nAPI Key جدید را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
+
             return new Response('OK');
+
           }
+
 
           if (data === 'admin_repos_menu') {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             const repos = await getActiveRepositories(env);
             let msg = `🐙 <b>مدیریت ریپازیتوری‌های GitHub</b>\n\n`;
             if (repos.length === 0) {
-              msg += `⚠️ هیچ ریپازیتوری تعریف نشده.\nاز متغیر محیطی GH_TOKEN استفاده می‌شود.`;
+              msg += `⚠️ هیچ ریپازیتوری اضافه‌ای تعریف نشده.\nهمان ریپوی پیش‌فرض (GH_TOKEN) استفاده می‌شود.`;
             } else {
               msg += `تعداد فعال: <b>${repos.length}</b>\n\n`;
               repos.forEach((r, i) => { msg += `${i + 1}. <code>${r.owner}/${r.repo}</code>\n`; });
@@ -3823,7 +3971,7 @@ export default {
               [colorBtn('➕ افزودن ریپازیتوری', 'admin_repo_add', 'success')],
               ...(repos.length > 0 ? [[colorBtn('🗑 حذف ریپازیتوری', 'admin_repo_delete_list', 'danger')]] : []),
               [colorBtn('🔄 ریست Round-Robin', 'admin_repo_reset_rr', 'blue')],
-              [colorBtn('🔙 بازگشت', 'back_to_admin', 'danger')]
+              [colorBtn('🔙 بازگشت', 'admin_panel', 'danger')]
             ]};
             await editMessage(chatId, msgId, msg, kb, TOKEN);
             return new Response('OK');
@@ -3839,7 +3987,7 @@ export default {
           if (data === 'admin_repo_delete_list') {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             const allRepos = await env.DB.prepare('SELECT * FROM github_repositories ORDER BY sort_order ASC, id ASC').all();
-            if (!allRepos.results || allRepos.results.length === 0) { await editMessage(chatId, msgId, '❌ ریپازیتوری‌ای وجود ندارد.', buildAdminKeyboard(), TOKEN); return new Response('OK'); }
+            if (!allRepos.results || allRepos.results.length === 0) { await editMessage(chatId, msgId, '❌ ریپازیتوری‌ای وجود ندارد.', ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
             const kb = { inline_keyboard: [...allRepos.results.map(r => [colorBtn(`🗑 ${r.owner}/${r.repo}`, `admin_repo_del:${r.id}`, 'danger')]), [colorBtn('🔙 بازگشت', 'admin_repos_menu', 'blue')]] };
             await editMessage(chatId, msgId, `🗑 روی ریپوی مورد نظر کلیک کنید:`, kb, TOKEN);
             return new Response('OK');
@@ -3849,14 +3997,14 @@ export default {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             const repoId = parseInt(data.split(':')[1]);
             await env.DB.prepare('DELETE FROM github_repositories WHERE id = ?').bind(repoId).run();
-            await editMessage(chatId, msgId, `✅ ریپازیتوری حذف شد.`, buildAdminKeyboard(), TOKEN);
+            await editMessage(chatId, msgId, `✅ ریپازیتوری حذف شد.`, ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
           if (data === 'admin_repo_reset_rr') {
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
             await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('repo_round_robin_index', '0')").run();
-            await editMessage(chatId, msgId, `✅ Round-Robin Index ریست شد.`, buildAdminKeyboard(), TOKEN);
+            await editMessage(chatId, msgId, `✅ Round-Robin Index ریست شد.`, ADMIN_KEYBOARD, TOKEN);
             return new Response('OK');
           }
 
@@ -4242,7 +4390,7 @@ export default {
 
               const uName = m.name || 'کاربر';
 
-              try { if (m.plan_snapshot) { const ps = JSON.parse(m.plan_snapshot); planName = ps.name || 'استاندارد'; } } catch (e) {}
+              try { if (m.plan_snapshot) { const ps = JSON.parse(m.plan_snapshot); planName = ps.name || 'استاندارد'; } } catch {}
 
               const hoursLeft = Math.round((m.expires_at - nowSec) / 3600);
 
@@ -4894,21 +5042,40 @@ export default {
 
           }
 
+          // ---- خرید پلن با ریال ----
+
           if (data.startsWith('buy_plan_rial:')) {
+
             const planId = parseInt(data.split(':')[1]);
+
             const plan = await getProPlanById(env, planId);
-            if (!plan || !plan.is_active) { await editMessage(chatId, msgId, '❌ این پلن در دسترس نیست.', MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+            if (!plan || !plan.is_active) { await editMessage(chatId, msgId, "❌ این پلن در دسترس نیست.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
             const rialEnabled = await isRialPaymentEnabled(env);
-            if (!rialEnabled) { await editMessage(chatId, msgId, '❌ درگاه پرداخت ریالی فعال نیست.', MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+            if (!rialEnabled) { await editMessage(chatId, msgId, "❌ درگاه پرداخت ریالی فعال نیست.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
             const rialPrice = plan.rial_price || 0;
-            if (rialPrice <= 0) { await editMessage(chatId, msgId, '❌ قیمت ریالی برای این پلن تنظیم نشده.', MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+            if (rialPrice <= 0) { await editMessage(chatId, msgId, "❌ قیمت ریالی برای این پلن تنظیم نشده.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
             const planDiscount = await getPlanDiscountForPlan(env, planId);
+
             const finalRial = planDiscount ? Math.round(rialPrice * (1 - planDiscount.discount_percent / 100)) : rialPrice;
+
+            const maxFileMB = plan.max_file_size_mb || (await getProFileSizeLimitMB(env));
+
             const order = await createTetra98Order(env, chatId, finalRial, planId);
-            if (!order.success) { await editMessage(chatId, msgId, '❌ خطا در ایجاد لینک پرداخت. دوباره تلاش کنید.', MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
-            const kb = { inline_keyboard: [[{ text: `🏦 پرداخت ${finalRial.toLocaleString('fa-IR')} تومان`, url: order.paymentUrl }], [colorBtn('🔙 بازگشت', 'pro_info', 'danger')]] };
-            await editMessage(chatId, msgId, `🏦 <b>خرید پلن با درگاه ریالی: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n⭐️ پس از پرداخت، پلن خودکار فعال می‌شود.\n\n💰 مبلغ: <b>${finalRial.toLocaleString('fa-IR')} تومان</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
+
+            if (!order.success) { await editMessage(chatId, msgId, "❌ خطا در ایجاد لینک پرداخت ریالی. لطفاً دوباره تلاش کنید.", MAIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+            const kb = { inline_keyboard: [[colorBtn(`🏦 پرداخت ${finalRial.toLocaleString('fa-IR')} تومان`, order.paymentUrl, "success")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
+
+            await editMessage(chatId, msgId, `🏦 <b>خرید پلن با درگاه ریالی: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${finalRial.toLocaleString('fa-IR')} تومان</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}\n\n⚡️ پس از پرداخت، پلن به صورت خودکار فعال می‌شود.`, kb, TOKEN);
+
             return new Response('OK');
+
           }
 
           // ---- Pro info ----
@@ -5556,14 +5723,6 @@ export default {
 
               }
 
-              if (step === 'awaiting_rial_api_key') {
-                if (!text || text.length < 8) { await sendMessage(chatId, '❌ API Key معتبر نیست.', ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-                await env.DB.prepare('INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)').bind('tetra98_api_key', text.trim()).run();
-                await dbDeleteAdminState(env, chatId);
-                await sendMessage(chatId, '✅ API Key درگاه Tetra98 ذخیره شد.', ADMIN_KEYBOARD, TOKEN);
-                return new Response('OK');
-              }
-
               if (step === 'awaiting_repo_owner') {
                 if (!text || text.length < 1) { await sendMessage(chatId, '❌ نام مالک معتبر نیست.', ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
                 await dbSetAdminState(env, chatId, { ...adminState, step: 'awaiting_repo_name', repoOwner: text.trim() });
@@ -5586,6 +5745,20 @@ export default {
                 await dbDeleteAdminState(env, chatId);
                 await sendMessage(chatId, `✅ ریپازیتوری <code>${adminState.repoOwner}/${adminState.repoName}</code> اضافه شد!`, ADMIN_KEYBOARD, TOKEN);
                 return new Response('OK');
+              }
+
+                            if (step === 'awaiting_rial_api_key') {
+
+                if (!text || text.length < 8) { await sendMessage(chatId, "❌ API Key معتبر نیست.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+                await env.DB.prepare('INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)').bind('tetra98_api_key', text.trim()).run();
+
+                await dbDeleteAdminState(env, chatId);
+
+                await sendMessage(chatId, `✅ API Key درگاه Tetra98 با موفقیت ذخیره شد.`, ADMIN_KEYBOARD, TOKEN);
+
+                return new Response('OK');
+
               }
 
               if (step === 'awaiting_stars_price') {
@@ -5826,7 +5999,31 @@ export default {
 
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_usd_price', name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: sp });
 
-                await sendMessage(chatId, `⭐️ Stars: ${sp}\n\nمرحله ۸ از ۸: قیمت دلاری را وارد کنید (مثال: <code>1.5</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `⭐️ Stars: ${sp}\n\nمرحله ۸ از ۹: قیمت دلاری را وارد کنید (مثال: <code>1.5</code>):`, ADMIN_KEYBOARD, TOKEN);
+
+                return new Response('OK');
+
+              }
+
+              if (step === 'awaiting_plan_rial_price') {
+
+                const rp = parseInt(text);
+
+                if (isNaN(rp) || rp < 0) { await sendMessage(chatId, "❌ عدد صحیح غیر منفی وارد کنید (برای غیرفعال: 0).", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+                await dbSetAdminState(env, chatId, { ...adminState, step: null, rialPrice: rp });
+
+                const adminStateF = await dbGetAdminState(env, chatId);
+
+                await env.DB.prepare('INSERT INTO pro_plans (name, duration_days, daily_files, daily_direct_files, daily_volume_gb, max_file_size_mb, stars_price, usd_price, rial_price, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, adminState.usdPrice, rp).run();
+
+                await dbDeleteAdminState(env, chatId);
+
+                await sendMessage(chatId,
+
+                  `✅ <b>پلن جدید ایجاد شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز\n📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز\n💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n⭐️ Stars: ${adminState.starsPrice} | 💵 ${adminState.usdPrice}$${rp > 0 ? ` | 🏦 ${rp.toLocaleString('fa-IR')} تومان` : ''}`,
+
+                  ADMIN_KEYBOARD, TOKEN);
 
                 return new Response('OK');
 
@@ -5838,7 +6035,21 @@ export default {
 
                 if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
 
-                await env.DB.prepare('INSERT INTO pro_plans (name, duration_days, daily_files, daily_direct_files, daily_volume_gb, max_file_size_mb, stars_price, usd_price, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0)').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, up).run();
+                await dbSetAdminState(env, chatId, { ...adminState, step: 'awaiting_plan_rial_price', usdPrice: up });
+
+                await sendMessage(chatId, `💵 قیمت دلاری: ${up}$\n\nمرحله ۹ از ۹: قیمت ریالی (تومان) را وارد کنید (برای غیرفعال: <code>0</code>):`, ADMIN_KEYBOARD, TOKEN);
+
+                return new Response('OK');
+
+              }
+
+              if (step === 'awaiting_plan_usd_price_DISABLED') {
+
+                const up = parseFloat(text);
+
+                if (isNaN(up) || up <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+                await env.DB.prepare('INSERT INTO pro_plans (name, duration_days, daily_files, daily_direct_files, daily_volume_gb, max_file_size_mb, stars_price, usd_price, rial_price, is_active, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, up, adminState.rialPrice || 0).run();
 
                 await dbDeleteAdminState(env, chatId);
 
@@ -5956,7 +6167,7 @@ export default {
 
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_stars_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: newMB });
 
-                await sendMessage(chatId, `📏 حجم فایل: ${newMB} مگابایت\n\nمرحله ۷ از ۸: Stars فعلی: ${plan.stars_price}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `📏 حجم فایل: ${newMB} مگابایت\n\nمرحله ۷ از ۹: Stars فعلی: ${plan.stars_price}\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
 
                 return new Response('OK');
 
@@ -5974,7 +6185,31 @@ export default {
 
                 await dbSetAdminState(env, chatId, { step: 'awaiting_plan_edit_usd_price', planId, name: adminState.name, days: adminState.days, dailyFiles: adminState.dailyFiles, dailyDirectFiles: adminState.dailyDirectFiles, dailyVolumeGB: adminState.dailyVolumeGB, maxFileSizeMB: adminState.maxFileSizeMB, starsPrice: newStars });
 
-                await sendMessage(chatId, `⭐️ Stars: ${newStars}\n\nمرحله ۸ از ۸: قیمت دلاری فعلی: ${plan.usd_price}$\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+                await sendMessage(chatId, `⭐️ Stars: ${newStars}\n\nمرحله ۸ از ۹: قیمت دلاری فعلی: ${plan.usd_price}$\nمقدار جدید (یا <code>-</code>):`, ADMIN_KEYBOARD, TOKEN);
+
+                return new Response('OK');
+
+              }
+
+              if (step === 'awaiting_plan_edit_rial_price') {
+
+                const planId = adminState.planId;
+
+                const plan = await getProPlanById(env, planId);
+
+                const newRial = text === '-' ? (plan.rial_price || 0) : parseInt(text);
+
+                if (isNaN(newRial) || newRial < 0) { await sendMessage(chatId, "❌ عدد صحیح غیر منفی وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+                await env.DB.prepare('UPDATE pro_plans SET name=?, duration_days=?, daily_files=?, daily_direct_files=?, daily_volume_gb=?, max_file_size_mb=?, stars_price=?, usd_price=?, rial_price=? WHERE id=?').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, adminState.usdPrice, newRial, planId).run();
+
+                await dbDeleteAdminState(env, chatId);
+
+                await sendMessage(chatId,
+
+                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n⭐️ Stars: ${adminState.starsPrice} | 💵 ${adminState.usdPrice}$${newRial > 0 ? ` | 🏦 ${newRial.toLocaleString('fa-IR')} تومان` : ''}\n\n⚠️ کاربران با پلن فعال تغییر نمی‌کنند (snapshot محفوظ است)`,
+
+                  ADMIN_KEYBOARD, TOKEN);
 
                 return new Response('OK');
 
@@ -5990,13 +6225,33 @@ export default {
 
                 if (isNaN(newUsd) || newUsd <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
 
-                await env.DB.prepare('UPDATE pro_plans SET name=?, duration_days=?, daily_files=?, daily_direct_files=?, daily_volume_gb=?, max_file_size_mb=?, stars_price=?, usd_price=? WHERE id=?').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, newUsd, planId).run();
+                await dbSetAdminState(env, chatId, { ...adminState, step: 'awaiting_plan_edit_rial_price', usdPrice: newUsd });
+
+                const curRial = plan.rial_price || 0;
+
+                await sendMessage(chatId, `💵 قیمت دلاری: ${newUsd}$\n\nمرحله ۹ از ۹: قیمت ریالی فعلی: ${curRial > 0 ? curRial.toLocaleString('fa-IR') + ' تومان' : 'تنظیم نشده'}\nمقدار جدید (یا <code>-</code> برای نگه‌داشتن، یا <code>0</code> برای غیرفعال):`, ADMIN_KEYBOARD, TOKEN);
+
+                return new Response('OK');
+
+              }
+
+              if (step === 'awaiting_plan_edit_usd_price_DISABLED') {
+
+                const planId = adminState.planId;
+
+                const plan = await getProPlanById(env, planId);
+
+                const newUsd = text === '-' ? plan.usd_price : parseFloat(text);
+
+                if (isNaN(newUsd) || newUsd <= 0) { await sendMessage(chatId, "❌ عدد مثبت وارد کنید.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
+
+                await env.DB.prepare('UPDATE pro_plans SET name=?, duration_days=?, daily_files=?, daily_direct_files=?, daily_volume_gb=?, max_file_size_mb=?, stars_price=?, usd_price=?, rial_price=? WHERE id=?').bind(adminState.name, adminState.days, adminState.dailyFiles, adminState.dailyDirectFiles, adminState.dailyVolumeGB, adminState.maxFileSizeMB, adminState.starsPrice, adminState.usdPrice || newUsd, adminState.rialPrice || 0, planId).run();
 
                 await dbDeleteAdminState(env, chatId);
 
                 await sendMessage(chatId,
 
-                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n Stars: ${adminState.starsPrice} | 💵 ${newUsd}$\n\n⚠️ کاربران با پلن فعال تغییر نمی‌کنند (snapshot محفوظ است)`,
+                  `✅ <b>پلن ویرایش شد!</b>\n\n📦 ${adminState.name}\n📅 ${adminState.days} روز | 📁 ${adminState.dailyFiles} کل (${adminState.dailyDirectFiles} مستقیم)/روز | 💾 ${adminState.dailyVolumeGB} GB/روز\n📏 ${adminState.maxFileSizeMB} مگابایت/فایل\n⭐️ Stars: ${adminState.starsPrice} | 💵 ${adminState.usdPrice || newUsd}$${adminState.rialPrice > 0 ? ` | 🏦 ${adminState.rialPrice} تومان` : ''}\n\n⚠️ کاربران با پلن فعال تغییر نمی‌کنند (snapshot محفوظ است)`,
 
                   ADMIN_KEYBOARD, TOKEN);
 
