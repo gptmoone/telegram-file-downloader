@@ -2249,11 +2249,6 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
       ghToken = env.GH_TOKEN;
     }
 
-    if (!ghToken) {
-      console.error(`sendWorkflowRequest: no ghToken for repo ${owner}/${repo}`);
-      return false;
-    }
-
     const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/workflows/download.yml/dispatches`, {
 
       method: 'POST', headers: { 'Authorization': `token ${ghToken}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' },
@@ -2263,17 +2258,23 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
     });
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      console.error(`sendWorkflowRequest failed: ${res.status} for ${owner}/${repo} - ${errText}`);
+      let errBody = '';
+      try { errBody = await res.text(); } catch(e2) {}
+      console.error(`GitHub dispatch failed: HTTP ${res.status} for ${owner}/${repo} - ${errBody}`);
+    } else {
+      console.log(`GitHub dispatch OK for ${owner}/${repo}, user=${userId}`);
     }
 
     return res.ok;
 
-  } catch (e) { console.error('sendWorkflowRequest exception:', e); return false; }
+  } catch (e) { console.error('sendWorkflowRequest exception:', String(e)); return false; }
 
 }
 
 async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
+
+  // Cloudflare Workers stateless: فقط dispatch کن و برگرد
+  // نتیجه از طریق callback /api/complete یا /api/failed دریافت میشه
 
   const userId = `${chatId}_${Date.now()}`;
 
@@ -2287,7 +2288,8 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
         await sendSimple(chatId, `⚠️ تلاش ${r + 1} ناموفق. تلاش مجدد...`, TOKEN);
 
-        await new Promise(x => setTimeout(x, RETRY_INTERVAL)); 
+        // در Workers نمیتوانیم 30 ثانیه صبر کنیم - فقط یک بار retry میکنیم
+        await new Promise(x => setTimeout(x, 2000));
 
     }
 
@@ -2295,7 +2297,9 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
   if (!sent) { 
 
-      await sendSimple(chatId, "❌ ارسال به GitHub شکست خورد.", TOKEN);
+      await sendSimple(chatId, "❌ ارسال به GitHub شکست خورد. دوباره فایل را بفرستید.", TOKEN);
+
+      await dbDeleteUserState(env, chatId);
 
       await finishTask(env); 
 
@@ -2303,33 +2307,10 @@ async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
   }
 
-  let started = false;
-
-  for (let i = 0; i < MAX_START_WAIT_ATTEMPTS; i++) {
-
-    await new Promise(x => setTimeout(x, START_WAIT_INTERVAL));
-
-    const st = await dbGetUserState(env, chatId);
-
-    if (st?.startedAt) { started = true; break; }
-
-  }
-
-  if (!started) await sendSimple(chatId, "⚠️ پردازش شروع نشد. با «وضعیت من» پیگیری کنید.", TOKEN);
-
-  for (let i = 0; i < MAX_WAIT_CYCLES; i++) {
-
-    await new Promise(x => setTimeout(x, WAIT_INTERVAL));
-
-    const st = await dbGetUserState(env, chatId);
-
-    if (st?.branchName) return;
-
-  }
-
-  await sendSimple(chatId, "❌ زمان انتظار تمام شد. با «وضعیت من» بررسی کنید.", TOKEN);
-
-  await finishTask(env);
+  // dispatch موفق بود - فقط پیام منتظر باشید بده و تمام
+  // GitHub Actions وقتی شروع کرد /api/started صدا میزنه
+  // وقتی تموم کرد /api/complete صدا میزنه
+  // نیازی به polling نیست
 
 }
 
@@ -3232,7 +3213,9 @@ export default {
 
                 await sendMessage(reqChatId, "🔧 <b>ربات در حال بروزرسانی است</b>\n\nلطفاً چند دقیقه صبر کنید و دوباره تلاش کنید.\n\nبه زودی بازخواهیم گشت! 🚀", MAIN_KEYBOARD, TOKEN);
 
-              } else if (update.message?.text && update.message.text !== '/start') {
+                return new Response('OK');
+
+              } else if (update.message) {
 
                 await sendMessage(reqChatId, "🔧 <b>ربات در حال بروزرسانی است</b>\n\nلطفاً چند دقیقه صبر کنید و دوباره تلاش کنید.\n\nبه زودی بازخواهیم گشت! 🚀", MAIN_KEYBOARD, TOKEN);
 
