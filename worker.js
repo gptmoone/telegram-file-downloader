@@ -2338,20 +2338,6 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
 
 }
 
-    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/download.yml/dispatches`, {
-
-      method: 'POST', headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' },
-
-      body: JSON.stringify({ ref: 'main', inputs: { file_url: finalUrl, file_id: fileId, zip_password: password, user_id: userId } })
-
-    });
-
-    return res.ok;
-
-  } catch (e) { return false; }
-
-}
-
 async function runTaskWithRetry(chatId, fileUrl, password, env, TOKEN) {
 
   const userId = `${chatId}_${Date.now()}`;
