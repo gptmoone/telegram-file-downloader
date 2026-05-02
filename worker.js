@@ -254,13 +254,13 @@ async function getActiveRepositories(env) {
   try {
     const rows = await env.DB.prepare('SELECT * FROM github_repositories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC').all();
     return rows.results || [];
-  } catch { return []; }
+  } catch (e) { return []; }
 }
 
 async function getRepositoryById(env, id) {
   try {
     return await env.DB.prepare('SELECT * FROM github_repositories WHERE id = ?').bind(id).first();
-  } catch { return null; }
+  } catch (e) { return null; }
 }
 
 async function getNextRepositoryRoundRobin(env) {
@@ -273,7 +273,7 @@ async function getNextRepositoryRoundRobin(env) {
   try {
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'repo_round_robin_index'").first();
     currentIndex = row ? parseInt(row.setting_value) || 0 : 0;
-  } catch {}
+  } catch (e) {}
 
   // normalize کردن index
   if (currentIndex >= repos.length) currentIndex = 0;
@@ -284,7 +284,7 @@ async function getNextRepositoryRoundRobin(env) {
   const nextIndex = (currentIndex + 1) % repos.length;
   try {
     await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('repo_round_robin_index', ?)").bind(String(nextIndex)).run();
-  } catch {}
+  } catch (e) {}
 
   return selectedRepo;
 }
@@ -295,7 +295,7 @@ async function getRepoSizeByRepo(env, owner, repo, token) {
       headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
     });
     if (res.ok) { const d = await res.json(); return d.size / (1024 * 1024); }
-  } catch {}
+  } catch (e) {}
   return 0;
 }
 
@@ -596,7 +596,7 @@ async function getBotSettings(env) {
 
     return settings;
 
-  } catch { return {}; }
+  } catch (e) { return {}; }
 
 }
 
@@ -618,7 +618,7 @@ async function getDirectUploadEnabled(env) {
 
     return row ? row.setting_value === '1' : true;
 
-  } catch { return true; }
+  } catch (e) { return true; }
 
 }
 
@@ -630,7 +630,7 @@ async function getNormalDailyDirectFiles(env) {
 
     return row ? parseInt(row.setting_value) : 1;
 
-  } catch { return 1; }
+  } catch (e) { return 1; }
 
 }
 
@@ -642,7 +642,7 @@ async function getEffectiveStarsPrice(env) {
 
     return row ? parseInt(row.setting_value) : STARS_AMOUNT;
 
-  } catch { return STARS_AMOUNT; }
+  } catch (e) { return STARS_AMOUNT; }
 
 }
 
@@ -654,7 +654,7 @@ async function getEffectiveUsdPrice(env) {
 
     return row ? parseFloat(row.setting_value) : USD_AMOUNT;
 
-  } catch { return USD_AMOUNT; }
+  } catch (e) { return USD_AMOUNT; }
 
 }
 
@@ -666,7 +666,7 @@ async function getMaintenanceMode(env) {
 
     return row?.setting_value === '1';
 
-  } catch { return false; }
+  } catch (e) { return false; }
 
 }
 
@@ -680,7 +680,7 @@ async function getMaintenanceExceptions(env) {
 
     return JSON.parse(row.setting_value);
 
-  } catch { return []; }
+  } catch (e) { return []; }
 
 }
 
@@ -692,7 +692,7 @@ async function getNormalFileSizeLimitMB(env) {
 
     return row ? parseInt(row.setting_value) : 200;
 
-  } catch { return 200; }
+  } catch (e) { return 200; }
 
 }
 
@@ -704,7 +704,7 @@ async function getProFileSizeLimitMB(env) {
 
     return row ? parseInt(row.setting_value) : 2048;
 
-  } catch { return 2048; }
+  } catch (e) { return 2048; }
 
 }
 
@@ -716,7 +716,7 @@ async function getNormalMaxTimeSec(env) {
 
     return row ? parseInt(row.setting_value) : TTL_NORMAL;
 
-  } catch { return TTL_NORMAL; }
+  } catch (e) { return TTL_NORMAL; }
 
 }
 
@@ -728,7 +728,7 @@ async function getProMaxTimeSec(env) {
 
     return row ? parseInt(row.setting_value) : TTL_PRO;
 
-  } catch { return TTL_PRO; }
+  } catch (e) { return TTL_PRO; }
 
 }
 
@@ -740,7 +740,7 @@ async function getNormalDailyFiles(env) {
 
     return row ? parseInt(row.setting_value) : DAILY_LIMIT_NORMAL;
 
-  } catch { return DAILY_LIMIT_NORMAL; }
+  } catch (e) { return DAILY_LIMIT_NORMAL; }
 
 }
 
@@ -752,7 +752,7 @@ async function getNormalDailyVolumeMB(env) {
 
     return row ? parseInt(row.setting_value) : NORMAL_DAILY_VOLUME_MB;
 
-  } catch { return NORMAL_DAILY_VOLUME_MB; }
+  } catch (e) { return NORMAL_DAILY_VOLUME_MB; }
 
 }
 
@@ -764,7 +764,7 @@ async function getRenewalDiscountPercent(env) {
 
     return row ? parseFloat(row.setting_value) : 0;
 
-  } catch { return 0; }
+  } catch (e) { return 0; }
 
 }
 
@@ -776,7 +776,7 @@ async function getRenewalNotifyHours(env) {
 
     return row ? parseInt(row.setting_value) : 48;
 
-  } catch { return 48; }
+  } catch (e) { return 48; }
 
 }
 
@@ -814,7 +814,7 @@ async function getReferralSettings(env) {
 
     };
 
-  } catch { return { enabled: true, referral_buy_bonus_enabled: false, referral_buy_bonus_plan_id: null, tiers: [] }; }
+  } catch (e) { return { enabled: true, referral_buy_bonus_enabled: false, referral_buy_bonus_plan_id: null, tiers: [] }; }
 
 }
 
@@ -834,7 +834,7 @@ async function getReferralCount(env, chatId) {
 
     return row?.cnt || 0;
 
-  } catch { return 0; }
+  } catch (e) { return 0; }
 
 }
 
@@ -1128,7 +1128,7 @@ async function getCouponByCode(env, code) {
 
     return row || null;
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1312,7 +1312,7 @@ async function getRequiredChannels(env) {
 
     return JSON.parse(row.channels);
 
-  } catch { return []; }
+  } catch (e) { return []; }
 
 }
 
@@ -1338,7 +1338,7 @@ async function isUserMemberOfChannels(chatId, channels, TOKEN) {
 
       if (!data.ok || !data.result || !['member', 'creator', 'administrator'].includes(data.result.status)) return false;
 
-    } catch { return false; }
+    } catch (e) { return false; }
 
   }
 
@@ -1398,7 +1398,7 @@ async function getProPlans(env) {
 
     return rows.results || [];
 
-  } catch { return []; }
+  } catch (e) { return []; }
 
 }
 
@@ -1410,7 +1410,7 @@ async function getAllProPlans(env) {
 
     return rows.results || [];
 
-  } catch { return []; }
+  } catch (e) { return []; }
 
 }
 
@@ -1422,7 +1422,7 @@ async function getProPlanById(env, planId) {
 
     return row || null;
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1436,7 +1436,7 @@ async function getUserActivePlan(env, chatId) {
 
     return JSON.parse(row.plan_snapshot);
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1450,7 +1450,7 @@ async function getPlanDiscountForPlan(env, planId) {
 
     return row || null;
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1665,7 +1665,7 @@ async function getDiscountSettings(env) {
 
     return { starsPrice: row.stars_price, usdPrice: row.usd_price, expiresAt: row.expires_at };
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1709,7 +1709,7 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD, planId, isRenewa
 
     return data.invoice_url ? { success: true, invoiceUrl: data.invoice_url, orderId } : { success: false };
 
-  } catch { return { success: false }; }
+  } catch (e) { return { success: false }; }
 
 }
 
@@ -1722,14 +1722,14 @@ async function isRialPaymentEnabled(env) {
   try {
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'rial_payment_enabled'").first();
     return row ? row.setting_value === '1' : false;
-  } catch { return false; }
+  } catch (e) { return false; }
 }
 
 async function getTetra98ApiKey(env) {
   try {
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'tetra98_api_key'").first();
     return row ? row.setting_value : '5b35ac6a72911b1abca2daf772bec697';
-  } catch { return '5b35ac6a72911b1abca2daf772bec697'; }
+  } catch (e) { return '5b35ac6a72911b1abca2daf772bec697'; }
 }
 
 async function createTetra98Order(env, chatId, rialAmount, planId, isRenewal = false) {
@@ -1756,7 +1756,7 @@ async function createTetra98Order(env, chatId, rialAmount, planId, isRenewal = f
       return { success: true, paymentUrl: data.payment_url_web, hashId, authority: data.Authority, trackingId: data.tracking_id };
     }
     return { success: false };
-  } catch { return { success: false }; }
+  } catch (e) { return { success: false }; }
 }
 
 async function verifyTetra98Payment(env, authority) {
@@ -1769,7 +1769,7 @@ async function verifyTetra98Payment(env, authority) {
     });
     const data = await res.json();
     return data.status === '100';
-  } catch { return false; }
+  } catch (e) { return false; }
 }
 
 async function createStarsInvoiceLink(env, chatId, starsAmount, planId, isRenewal = false) {
@@ -1792,7 +1792,7 @@ async function createStarsInvoiceLink(env, chatId, starsAmount, planId, isRenewa
 
     return data.ok ? { success: true, invoiceLink: data.result, payload } : { success: false };
 
-  } catch { return { success: false }; }
+  } catch (e) { return { success: false }; }
 
 }
 
@@ -1814,7 +1814,7 @@ async function getFileSize(url) {
 
     return s ? parseInt(s) : null; 
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1825,7 +1825,7 @@ async function getUserRepo(env, chatId) {
     if (row && row.setting_value) {
       return JSON.parse(row.setting_value);
     }
-  } catch {}
+  } catch (e) {}
   // fallback
   return { owner: GITHUB_OWNER, repo: GITHUB_REPO, ghToken: null };
 }
@@ -1851,7 +1851,7 @@ async function getBranchTotalSize(env, branchName, chatId) {
 
     return (data.tree || []).filter(i => i.type === 'blob').reduce((s, i) => s + (i.size || 0), 0);
 
-  } catch { return null; }
+  } catch (e) { return null; }
 
 }
 
@@ -1872,7 +1872,7 @@ async function deleteBranchFromGitHub(env, branchName, chatId) {
 
     return res.ok || res.status === 404;
 
-  } catch { return false; }
+  } catch (e) { return false; }
 
 }
 
@@ -2074,7 +2074,7 @@ async function startBroadcast(env, adminChatId, messageText, TOKEN) {
 
         rd.ok ? sent++ : fail++;
 
-      } catch { fail++; }
+      } catch (e) { fail++; }
 
     }));
 
@@ -2184,7 +2184,7 @@ async function sendRenewalNotifications(env, TOKEN) {
 
           }
 
-        } catch {}
+        } catch (e) {}
 
       }
 
@@ -2316,7 +2316,7 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
       // ذخیره ریپوی انتخاب‌شده برای این کاربر (برای حذف شاخه و دانلود بعدی)
       try {
         await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)").bind(`user_repo_${chatId}`, JSON.stringify({ owner, repo, repoId: selectedRepo.id, ghToken })).run();
-      } catch {}
+      } catch (e) {}
     } else {
       // fallback به متغیر محیطی اصلی
       owner = GITHUB_OWNER;
@@ -2334,7 +2334,7 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
 
     return res.ok;
 
-  } catch { return false; }
+  } catch (e) { return false; }
 
 }
 
@@ -2348,7 +2348,7 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
 
     return res.ok;
 
-  } catch { return false; }
+  } catch (e) { return false; }
 
 }
 
@@ -2612,7 +2612,7 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
 
       try { const ps = JSON.parse(row.plan_snapshot);
 
-      planName = ps.name || 'استاندارد'; } catch {}
+      planName = ps.name || 'استاندارد'; } catch (e) {}
 
     }
 
@@ -2813,23 +2813,23 @@ async function ensureTables(env) {
 
   
 
-  try { await env.DB.prepare(`ALTER TABLE pro_users ADD COLUMN plan_snapshot TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE pro_users ADD COLUMN plan_snapshot TEXT`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN max_file_size_mb INTEGER DEFAULT 2048`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN max_file_size_mb INTEGER DEFAULT 2048`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN daily_direct_files INTEGER DEFAULT 3`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN daily_direct_files INTEGER DEFAULT 3`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN password TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN password TEXT`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN branch_name TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE oversized_pending ADD COLUMN branch_name TEXT`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN name TEXT`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE users ADD COLUMN name TEXT`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE daily_limits ADD COLUMN direct_file_count INTEGER DEFAULT 0`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE daily_limits ADD COLUMN direct_file_count INTEGER DEFAULT 0`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN rial_price INTEGER DEFAULT 0`).run(); } catch {}
+  try { await env.DB.prepare(`ALTER TABLE pro_plans ADD COLUMN rial_price INTEGER DEFAULT 0`).run(); } catch (e) {}
 
-  try { await env.DB.prepare(`CREATE TABLE IF NOT EXISTS github_repositories (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, repo TEXT NOT NULL, gh_token TEXT NOT NULL, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0, created_at INTEGER)`).run(); } catch {}
+  try { await env.DB.prepare(`CREATE TABLE IF NOT EXISTS github_repositories (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, repo TEXT NOT NULL, gh_token TEXT NOT NULL, is_active INTEGER DEFAULT 1, sort_order INTEGER DEFAULT 0, created_at INTEGER)`).run(); } catch (e) {}
 
 }
 
@@ -2911,7 +2911,7 @@ export default {
 
                 if (b.chat_id) {
 
-                  try { await env.DB.prepare("DELETE FROM bot_settings WHERE setting_key = ?").bind(`user_repo_${b.chat_id}`).run(); } catch {}
+                  try { await env.DB.prepare("DELETE FROM bot_settings WHERE setting_key = ?").bind(`user_repo_${b.chat_id}`).run(); } catch (e) {}
 
                 }
 
@@ -2947,7 +2947,7 @@ export default {
 
         return new Response(JSON.stringify({ deleted }), { headers: { 'Content-Type': 'application/json' } });
 
-      } catch { return new Response('Error', { status: 500 }); }
+      } catch (e) { return new Response('Error', { status: 500 }); }
 
     }
 
@@ -2971,7 +2971,7 @@ export default {
 
         return new Response('OK');
 
-      } catch { return new Response('Error', { status: 500 }); }
+      } catch (e) { return new Response('Error', { status: 500 }); }
 
     }
 
@@ -2992,7 +2992,7 @@ export default {
           }
         }
         return new Response('OK');
-      } catch { return new Response('Error', { status: 500 }); }
+      } catch (e) { return new Response('Error', { status: 500 }); }
     }
 
     if (path === '/api/started' && request.method === 'POST') {
@@ -3013,7 +3013,7 @@ export default {
 
         return new Response('OK');
 
-      } catch { return new Response('OK'); }
+      } catch (e) { return new Response('OK'); }
 
     }
 
@@ -3035,7 +3035,7 @@ export default {
 
         return new Response('OK');
 
-      } catch { return new Response('OK'); }
+      } catch (e) { return new Response('OK'); }
 
     }
 
@@ -3107,7 +3107,7 @@ export default {
 
             let password = oversizedRow.password || '';
 
-            if (reqRow?.request_data) { try { const rd = JSON.parse(reqRow.request_data); password = rd.password || password; } catch {} }
+            if (reqRow?.request_data) { try { const rd = JSON.parse(reqRow.request_data); password = rd.password || password; } catch (e) {} }
 
             const userRepoOvs = await getUserRepo(env, chatId);
             const link = `https://github.com/${userRepoOvs.owner}/${userRepoOvs.repo}/archive/${branch}.zip`;
@@ -3190,7 +3190,7 @@ export default {
 
              isDirect = rd.url && rd.url.startsWith('tg_file_id:');
 
-           } catch {} 
+           } catch (e) {} 
 
         }
 
@@ -3247,7 +3247,7 @@ export default {
 
         return new Response('OK');
 
-      } catch { return new Response('OK'); }
+      } catch (e) { return new Response('OK'); }
 
     }
 
@@ -3269,7 +3269,7 @@ export default {
 
         return new Response('OK');
 
-      } catch { return new Response('OK'); }
+      } catch (e) { return new Response('OK'); }
 
     }
 
@@ -4426,7 +4426,7 @@ export default {
 
               const uName = m.name || 'کاربر';
 
-              try { if (m.plan_snapshot) { const ps = JSON.parse(m.plan_snapshot); planName = ps.name || 'استاندارد'; } } catch {}
+              try { if (m.plan_snapshot) { const ps = JSON.parse(m.plan_snapshot); planName = ps.name || 'استاندارد'; } } catch (e) {}
 
               const hoursLeft = Math.round((m.expires_at - nowSec) / 3600);
 
@@ -6960,4 +6960,3 @@ export default {
   }
 
 };
-
