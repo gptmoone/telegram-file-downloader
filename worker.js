@@ -2234,7 +2234,7 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
       if (selectedRepo) {
         owner = selectedRepo.owner;
         repo = selectedRepo.repo;
-        ghToken = selectedRepo.gh_token;
+        ghToken = selectedRepo.gh_token || env.GH_TOKEN;
         try {
           await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)").bind(`user_repo_${chatId}`, JSON.stringify({ owner, repo, repoId: selectedRepo.id, ghToken })).run();
         } catch (e) {}
@@ -2249,6 +2249,11 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
       ghToken = env.GH_TOKEN;
     }
 
+    if (!ghToken) {
+      console.error(`sendWorkflowRequest: no ghToken for repo ${owner}/${repo}`);
+      return false;
+    }
+
     const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/actions/workflows/download.yml/dispatches`, {
 
       method: 'POST', headers: { 'Authorization': `token ${ghToken}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' },
@@ -2257,9 +2262,14 @@ async function sendWorkflowRequest(chatId, fileUrl, password, userId, env) {
 
     });
 
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.error(`sendWorkflowRequest failed: ${res.status} for ${owner}/${repo} - ${errText}`);
+    }
+
     return res.ok;
 
-  } catch (e) { return false; }
+  } catch (e) { console.error('sendWorkflowRequest exception:', e); return false; }
 
 }
 
@@ -2950,7 +2960,7 @@ export default {
 
         const planInfo = isPro ? await getUserActivePlan(env, chatId) : null;
 
-        const totalSizeBytes = await getBranchTotalSize(env, branch) || 0;
+        const totalSizeBytes = await getBranchTotalSize(env, branch, chatId) || 0;
 
         const oversizedRow = await env.DB.prepare('SELECT file_url, file_size, password, created_at FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
 
