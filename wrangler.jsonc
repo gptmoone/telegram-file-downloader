@@ -8,5 +8,14 @@
       "binding": "QUEUE",
       "id": "d5b3db4b0d1b4b96990ffcca710c1d4a"
     }
-  ]
+  ],
+  "vars": {
+    "TELEGRAM_TOKEN": "",
+    "GH_TOKEN": "",
+    "NOWPAYMENTS_API_KEY": "",
+    "NOWPAYMENTS_IPN_SECRET": "",
+    "PRO_PRICE": "",
+    "ADMIN_SECRET": "",
+    "ADMIN_CHAT_ID": ""
+  }
 }
