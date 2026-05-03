@@ -47,7 +47,7 @@ jobs:
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
           INPUT_FILE_URL: ${{ github.event.inputs.file_url }}
           INPUT_FILE_ID: ${{ github.event.inputs.file_id }}
         run: |
@@ -66,12 +66,12 @@ jobs:
           async def main():
               api_id = int(os.environ['TG_API_ID'])
               api_hash = os.environ['TG_API_HASH']
-              bot_token = os.environ['TG_BOT_TOKEN']
+              session_string = os.environ['TG_SESSION_STRING']
               file_id = os.environ['INPUT_FILE_ID']
               
-              app = Client("my_bot_session", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+              app = Client("my_bot_session", session_string=session_string, api_id=api_id, api_hash=api_hash)
               async with app:
-                  print("Connected directly to Telegram! Downloading file...")
+                  print("Connected directly to Telegram via Session String! Downloading file...")
                   file_path = await app.download_media(file_id)
                   if file_path:
                       print(f"Downloaded successfully to: {file_path}")
