@@ -1,3 +1,4 @@
+
 // ============================================================
 
 // ربات دانلودر ملی - نسخه نهایی کامل با قابلیت‌های پیشرفته
@@ -55,74 +56,6 @@ const OVERSIZED_PENDING_HOURS = 1;
 const GITHUB_OWNER = 'gptmoone';
 
 const GITHUB_REPO = 'telegram-file-downloader';
-
-// ============================================================
-
-// مدیریت چند ریپازیتوری (Multi-Repo Load Balancing)
-
-// ============================================================
-
-// لیست همه ریپازیتوری‌ها به ترتیب
-
-// tokenEnvKey = نام متغیر محیطی (env) که GitHub Token آن ریپو در آن ذخیره است
-
-// برای ریپو اول از GH_TOKEN و برای ریپو دوم از GH_TOKEN_2 استفاده می‌شود
-
-// برای افزودن ریپوی سوم: { owner: 'user3', repo: 'repo3', tokenEnvKey: 'GH_TOKEN_3' }
-
-const REPO_CONFIGS = [
-
-  { owner: 'gptmoone',    repo: 'telegram-file-downloader', tokenEnvKey: 'GH_TOKEN' },
-
-  { owner: 'hamidpalang', repo: 'telegram-file-downloader', tokenEnvKey: 'GH_TOKEN_2' },
-
-];
-
-function getActiveRepos(env) {
-
-  return REPO_CONFIGS.filter(r => !!env[r.tokenEnvKey]);
-
-}
-
-function getRepoToken(env, repoConfig) {
-
-  return env[repoConfig.tokenEnvKey] || env.GH_TOKEN;
-
-}
-
-async function getNextRepo(env) {
-
-  try {
-
-    const activeRepos = getActiveRepos(env);
-
-    if (activeRepos.length === 0) return REPO_CONFIGS[0];
-
-    if (activeRepos.length === 1) return activeRepos[0];
-
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'repo_round_robin_index'").first();
-
-    let idx = row ? parseInt(row.setting_value) : 0;
-
-    if (isNaN(idx) || idx < 0 || idx >= activeRepos.length) idx = 0;
-
-    const selected = activeRepos[idx];
-
-    const nextIdx = (idx + 1) % activeRepos.length;
-
-    await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('repo_round_robin_index', ?)").bind(String(nextIdx)).run();
-
-    return selected;
-
-  } catch (e) {
-
-    console.error('getNextRepo error:', e);
-
-    return REPO_CONFIGS[0];
-
-  }
-
-}
 
 const lastCallbackProcessed = new Map();
 
@@ -184,9 +117,7 @@ const MAIN_KEYBOARD = {
 
     [colorBtn("🎁 اشتراک رایگان Pro", "referral_menu", "blue"), colorBtn("🏷 کد تخفیف", "use_discount_code", "blue")],
 
-    [colorBtn("❓ راهنما", "help", "blue"), { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }],
-
-    [colorBtn("📜 قوانین و حریم خصوصی", "privacy_policy", "blue")]
+    [colorBtn("❓ راهنما", "help", "blue"), { text: "📢 کانال پشتیبانی", url: "https://t.me/maramidownload" }]
 
   ]
 
@@ -215,14 +146,11 @@ function buildAdminKeyboard() {
       [colorBtn("👥 اعضای Pro", "admin_pro_members_page:1", "blue"), colorBtn("🔔 تخفیف تمدید", "admin_renewal_discount", "blue")],
 
       [colorBtn("🎟 مدیریت کدهای تخفیف", "admin_coupon_menu", "green"), colorBtn("🔗 تنظیمات رفرال", "admin_referral_settings", "blue")],
-
       [colorBtn("🏦 تنظیمات درگاه ریالی", "admin_rial_settings", "blue")],
 
       [colorBtn("📈 آمار رفرال‌ها", "admin_referral_stats", "blue"), colorBtn("🔴 حالت بروزرسانی", "admin_maintenance_toggle", "danger")],
 
       [colorBtn("⚡️ فعال/غیرفعال ارسال مستقیم", "admin_toggle_direct", "primary"), colorBtn("🖥 مانیتورینگ", "admin_monitoring", "blue")],
-
-      [colorBtn("🖼 مدیریت تصویر/متن خوش‌آمد", "admin_welcome_settings", "blue"), colorBtn("🔍 جستجوی کاربر", "admin_user_lookup", "blue")],
 
       [colorBtn("🔙 منوی اصلی", "back_to_main", "danger")]
 
@@ -318,17 +246,13 @@ async function answerCallback(callbackId, TOKEN) {
 
 }
 
-async function getRepoSize(env, repoConfig) {
+async function getRepoSize(env) {
 
   try {
 
-    const rc = repoConfig || REPO_CONFIGS[0];
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}`, {
 
-    const token = getRepoToken(env, rc);
-
-    const res = await fetch(`https://api.github.com/repos/${rc.owner}/${rc.repo}`, {
-
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+      headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
 
     });
 
@@ -337,20 +261,6 @@ async function getRepoSize(env, repoConfig) {
   } catch (e) { }
 
   return 0;
-
-}
-
-async function getTotalRepoSize(env) {
-
-  let total = 0;
-
-  for (const rc of getActiveRepos(env)) {
-
-    total += await getRepoSize(env, rc);
-
-  }
-
-  return total;
 
 }
 
@@ -552,40 +462,15 @@ async function dbGetUsersCount(env) {
 
 }
 
-async function dbAddUser(env, chatId, name = 'کاربر', username = null) {
+async function dbAddUser(env, chatId, name = 'کاربر') {
 
-  const now = Date.now();
-
-  // برای کاهش write روی D1: last_seen فقط هر ۵ دقیقه یکبار بروز می‌شود
-  // این به شدت تعداد write های روزانه را کاهش می‌دهد
-
-  await env.DB.prepare(
-
-    'INSERT INTO users (chat_id, first_seen, name, username, last_seen) VALUES (?, ?, ?, ?, ?) ' +
-
-    'ON CONFLICT(chat_id) DO UPDATE SET name = excluded.name, username = excluded.username, ' +
-
-    'last_seen = CASE WHEN (excluded.last_seen - COALESCE(last_seen, 0)) > 300000 THEN excluded.last_seen ELSE last_seen END'
-
-  ).bind(chatId, now, name, username || null, now).run();
+  await env.DB.prepare('INSERT INTO users (chat_id, first_seen, name) VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET name = excluded.name').bind(chatId, Date.now(), name).run();
 
 }
 
-async function dbAddActiveBranch(env, branchName, chatId, createdAt, expiresAt, repoOwner, repoName) {
+async function dbAddActiveBranch(env, branchName, chatId, createdAt, expiresAt) {
 
-  try {
-
-    await env.DB.prepare('ALTER TABLE active_branches ADD COLUMN repo_owner TEXT').run();
-
-  } catch {}
-
-  try {
-
-    await env.DB.prepare('ALTER TABLE active_branches ADD COLUMN repo_name TEXT').run();
-
-  } catch {}
-
-  await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at, expires_at, repo_owner, repo_name) VALUES (?, ?, ?, ?, ?, ?)').bind(branchName, chatId, createdAt, expiresAt, repoOwner || GITHUB_OWNER, repoName || GITHUB_REPO).run();
+  await env.DB.prepare('INSERT OR REPLACE INTO active_branches (branch_name, chat_id, created_at, expires_at) VALUES (?, ?, ?, ?)').bind(branchName, chatId, createdAt, expiresAt).run();
 
 }
 
@@ -603,9 +488,9 @@ async function dbGetLastBranch(env, chatId) {
 
 }
 
-async function dbSetBranchForUser(env, chatId, branchName, expiresAt, repoOwner, repoName) {
+async function dbSetBranchForUser(env, chatId, branchName, expiresAt) {
 
-  await dbAddActiveBranch(env, branchName, chatId, Date.now(), expiresAt, repoOwner, repoName);
+  await dbAddActiveBranch(env, branchName, chatId, Date.now(), expiresAt);
 
   await env.DB.prepare('UPDATE user_state SET branch_name = ? WHERE chat_id = ?').bind(branchName, chatId).run();
 
@@ -822,18 +707,6 @@ async function getRenewalNotifyHours(env) {
     return row ? parseInt(row.setting_value) : 48;
 
   } catch { return 48; }
-
-}
-
-async function getEffectiveMaxConcurrent(env) {
-
-  try {
-
-    const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'max_concurrent'").first();
-
-    return row ? parseInt(row.setting_value) : MAX_CONCURRENT;
-
-  } catch { return MAX_CONCURRENT; }
 
 }
 
@@ -1769,110 +1642,63 @@ async function createNowPaymentsInvoice(env, chatId, amountUSD, planId, isRenewa
 
 }
 
+
 // ============================================================
-
 // توابع درگاه پرداخت ریالی Tetra98
-
 // ============================================================
 
 async function isRialPaymentEnabled(env) {
-
   try {
-
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'rial_payment_enabled'").first();
-
     return row ? row.setting_value === '1' : false;
-
   } catch { return false; }
-
 }
 
 async function getTetra98ApiKey(env) {
-
   try {
-
     const row = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = 'tetra98_api_key'").first();
-
     return row ? row.setting_value : '5b35ac6a72911b1abca2daf772bec697';
-
   } catch { return '5b35ac6a72911b1abca2daf772bec697'; }
-
 }
 
 async function createTetra98Order(env, chatId, rialAmount, planId, isRenewal = false) {
-
   try {
-
     const apiKey = await getTetra98ApiKey(env);
-
     const hashId = `rial_${chatId}_${planId || 0}_${Date.now()}`;
-
     const workerUrl = env.WORKER_URL || 'https://telegram-file-bot.gptmoone.workers.dev';
-
     const body = {
-
       ApiKey: apiKey,
-
       Hash_id: hashId,
-
       Amount: rialAmount,
-
       Description: isRenewal ? 'تمدید اشتراک Pro' : 'اشتراک Pro',
-
       Email: 'user@example.com',
-
       Mobile: '09120000000',
-
       CallbackURL: `${workerUrl}/api/tetra98-callback`
-
     };
-
     const res = await fetch('https://tetra98.com/api/create_order', {
-
       method: 'POST',
-
       headers: { 'Content-Type': 'application/json' },
-
       body: JSON.stringify(body)
-
     });
-
     const data = await res.json();
-
     if (data.status === '100' && data.payment_url_web) {
-
       return { success: true, paymentUrl: data.payment_url_web, hashId, authority: data.Authority, trackingId: data.tracking_id };
-
     }
-
     return { success: false };
-
   } catch { return { success: false }; }
-
 }
 
 async function verifyTetra98Payment(env, authority) {
-
   try {
-
     const apiKey = await getTetra98ApiKey(env);
-
     const res = await fetch('https://tetra98.com/api/verify', {
-
       method: 'POST',
-
       headers: { 'Content-Type': 'application/json' },
-
       body: JSON.stringify({ ApiKey: apiKey, authority })
-
     });
-
     const data = await res.json();
-
     return data.status === '100';
-
   } catch { return false; }
-
 }
 
 async function createStarsInvoiceLink(env, chatId, starsAmount, planId, isRenewal = false) {
@@ -1921,17 +1747,13 @@ async function getFileSize(url) {
 
 }
 
-async function getBranchTotalSize(env, branchName, repoConfig) {
+async function getBranchTotalSize(env, branchName) {
 
   try {
 
-    const rc = repoConfig || REPO_CONFIGS[0];
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/trees/${branchName}?recursive=1`, {
 
-    const token = getRepoToken(env, rc);
-
-    const res = await fetch(`https://api.github.com/repos/${rc.owner}/${rc.repo}/git/trees/${branchName}?recursive=1`, {
-
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+      headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
 
     });
 
@@ -1945,61 +1767,19 @@ async function getBranchTotalSize(env, branchName, repoConfig) {
 
 }
 
-async function deleteBranchFromGitHub(env, branchName, repoConfig) {
+async function deleteBranchFromGitHub(env, branchName) {
 
   try {
 
-    const rc = repoConfig || await getRepoConfigForBranch(env, branchName);
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/refs/heads/${branchName}`, {
 
-    const token = getRepoToken(env, rc);
-
-    const res = await fetch(`https://api.github.com/repos/${rc.owner}/${rc.repo}/git/refs/heads/${branchName}`, {
-
-      method: 'DELETE', headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
+      method: 'DELETE', headers: { 'Authorization': `token ${env.GH_TOKEN}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Bot/1.0' }
 
     });
 
     return res.ok || res.status === 404;
 
   } catch { return false; }
-
-}
-
-// پیدا کردن ریپوی مرتبط با یک branch از D1
-
-async function getRepoConfigForBranch(env, branchName) {
-
-  try {
-
-    // ابتدا از جدول active_branches بخوان
-
-    const row = await env.DB.prepare('SELECT repo_owner, repo_name FROM active_branches WHERE branch_name = ?').bind(branchName).first();
-
-    if (row && row.repo_owner) {
-
-      const found = REPO_CONFIGS.find(r => r.owner === row.repo_owner && r.repo === row.repo_name);
-
-      if (found) return found;
-
-    }
-
-    // بعد از bot_settings بخوان (برای موارد در حال پردازش)
-
-    const settingRow = await env.DB.prepare("SELECT setting_value FROM bot_settings WHERE setting_key = ?").bind('branch_repo_' + branchName).first();
-
-    if (settingRow) {
-
-      const data = JSON.parse(settingRow.setting_value);
-
-      const found = REPO_CONFIGS.find(r => r.owner === data.owner && r.repo === data.repo);
-
-      if (found) return found;
-
-    }
-
-  } catch (e) {}
-
-  return REPO_CONFIGS[0];
 
 }
 
@@ -2338,15 +2118,10 @@ async function sendRenewalNotifications(env, TOKEN) {
         if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$ (${renewalDiscount}٪ تخفیف)`, url: usdInv.invoiceUrl }]);
 
         const rialEnabledR = await isRialPaymentEnabled(env);
-
         if (rialEnabledR && plan && plan.rial_price > 0) {
-
           const rialR = Math.round(plan.rial_price * (1 - renewalDiscount / 100));
-
           const rialOrderR = await createTetra98Order(env, chatId, rialR, plan?.id, true);
-
           if (rialOrderR.success) rows.push([{ text: `🏦 تمدید ریالی — ${rialR.toLocaleString('fa-IR')} تومان (${renewalDiscount}٪ تخفیف)`, url: rialOrderR.paymentUrl }]);
-
         }
 
       } else {
@@ -2356,13 +2131,9 @@ async function sendRenewalNotifications(env, TOKEN) {
         if (usdInv.success) rows.push([{ text: `💰 تمدید با ارز دیجیتال — ${usdPrice}$`, url: usdInv.invoiceUrl }]);
 
         const rialEnabledR2 = await isRialPaymentEnabled(env);
-
         if (rialEnabledR2 && plan && plan.rial_price > 0) {
-
           const rialOrderR2 = await createTetra98Order(env, chatId, plan.rial_price, plan?.id, true);
-
           if (rialOrderR2.success) rows.push([{ text: `🏦 تمدید ریالی — ${plan.rial_price.toLocaleString('fa-IR')} تومان`, url: rialOrderR2.paymentUrl }]);
-
         }
 
       }
@@ -2575,7 +2346,7 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
 
   
 
-  const repoSize = await getTotalRepoSize(env);
+  const repoSize = await getRepoSize(env);
 
   if (repoSize >= REPO_SIZE_LIMIT_GB) { 
 
@@ -2585,7 +2356,7 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
 
   }
 
-  if (repoSize >= REPO_SIZE_WARNING_GB) await sendMessage(chatId, `⚠️ مخازن نزدیک به پر شدن هستند (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB * getActiveRepos(env).length} گیگابایت مجموع).`, MAIN_KEYBOARD, TOKEN);
+  if (repoSize >= REPO_SIZE_WARNING_GB) await sendMessage(chatId, `⚠️ مخزن نزدیک به پر شدن (${repoSize.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} گیگابایت).`, MAIN_KEYBOARD, TOKEN);
 
   
 
@@ -2644,13 +2415,9 @@ async function processPendingLink(env, chatId, fileUrl, fileSize, TOKEN) {
     for (const plan of plans.slice(0, 3)) {
 
       const rialEnabledQ = await isRialPaymentEnabled(env);
-
       const rialPriceQ = plan.rial_price || 0;
-
       const qRow = [{ text: `⭐️ ${plan.name} — ${plan.stars_price} Stars`, callback_data: `buy_plan_stars:${plan.id}` }, { text: `💰 ${plan.usd_price}$`, callback_data: `buy_plan_usd:${plan.id}` }];
-
       if (rialEnabledQ && rialPriceQ > 0) qRow.splice(1, 0, { text: `🏦 ${rialPriceQ.toLocaleString('fa-IR')} تومان`, callback_data: `buy_plan_rial:${plan.id}` });
-
       planRows.push(qRow);
 
     }
@@ -2852,31 +2619,20 @@ async function showProPlansToUser(env, chatId, msgIdToEdit, TOKEN, appliedCoupon
       msg += `   📁 ${plan.daily_files} کل | 🚀 ${plan.daily_direct_files} مستقیم/روز | 💾 ${plan.daily_volume_gb} GB/روز | 📏 ${maxFileMB} MB/فایل\n`;
 
       const rialMsgPrice = plan.rial_price || 0;
-
       msg += `   💰 ${plan.stars_price} Stars | ${plan.usd_price}$${rialMsgPrice > 0 ? ` | 🏦 ${rialMsgPrice.toLocaleString('fa-IR')} تومان` : ''}\n\n`;
 
     }
 
     const rialEnabled5 = await isRialPaymentEnabled(env);
-
     const rialPrice5 = plan.rial_price || 0;
-
     const planRow5 = [
-
         colorBtn(`${planDiscount ? '🎉' : '⭐️'} ${plan.name} — ${starsPrice} Stars`, `buy_plan_stars:${plan.id}`, "primary"), 
-
         colorBtn(`💰 ${usdPrice}$`, `buy_plan_usd:${plan.id}`, "success")
-
     ];
-
     if (rialEnabled5 && rialPrice5 > 0) {
-
       const discRial5 = planDiscount ? Math.round(rialPrice5 * (1 - planDiscount.discount_percent / 100)) : rialPrice5;
-
       planRow5.splice(1, 0, colorBtn(`🏦 ${discRial5.toLocaleString('fa-IR')} تومان`, `buy_plan_rial:${plan.id}`, "success"));
-
     }
-
     rows.push(planRow5);
 
   }
@@ -2922,12 +2678,6 @@ async function ensureTables(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS coupon_uses (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, chat_id TEXT NOT NULL, used_at INTEGER, UNIQUE(code, chat_id))`).run();
 
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS users (chat_id TEXT PRIMARY KEY, first_seen INTEGER, name TEXT)`).run();
-
-  try { await env.DB.prepare('ALTER TABLE users ADD COLUMN username TEXT').run(); } catch {}
-
-  try { await env.DB.prepare('ALTER TABLE users ADD COLUMN last_seen INTEGER').run(); } catch {}
-
-  try { await env.DB.prepare('ALTER TABLE users ADD COLUMN join_ip_hash TEXT').run(); } catch {}
 
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS daily_limits (chat_id TEXT PRIMARY KEY, file_count INTEGER DEFAULT 0, direct_file_count INTEGER DEFAULT 0, reset_date INTEGER, daily_volume_bytes INTEGER)`).run();
 
@@ -3086,41 +2836,23 @@ export default {
     }
 
     if (path === '/api/tetra98-callback' && request.method === 'POST') {
-
       try {
-
         const body = await request.json();
-
         if (body.status === '100' && body.authority) {
-
           const verified = await verifyTetra98Payment(env, body.authority);
-
           if (verified) {
-
             // hash_id format: rial_{chatId}_{planId}_{timestamp}
-
             const hashId = body.hash_id || '';
-
             const parts = hashId.split('_');
-
             const chatId = parts[1];
-
             const planId = parts[2] && !isNaN(parts[2]) && parts[2] !== '0' ? parseInt(parts[2]) : null;
-
             if (chatId) {
-
               await activateProSubscription(env, chatId, `tetra98_${body.authority}`, 'پرداخت ریالی', TOKEN, planId);
-
             }
-
           }
-
         }
-
         return new Response('OK');
-
       } catch { return new Response('Error', { status: 500 }); }
-
     }
 
     if (path === '/api/started' && request.method === 'POST') {
@@ -3181,29 +2913,7 @@ export default {
 
         const planInfo = isPro ? await getUserActivePlan(env, chatId) : null;
 
-        // پیدا کردن ریپویی که این branch در آن ساخته شده
-
-        const completingRepoConfig = await getPendingRepoForUser(env, user_id) || REPO_CONFIGS[0];
-
-        // ذخیره ریپو برای این branch در active_branches (قبل از هر چیز دیگری)
-
-        try {
-
-          await env.DB.prepare('ALTER TABLE active_branches ADD COLUMN repo_owner TEXT').run();
-
-        } catch {}
-
-        try {
-
-          await env.DB.prepare('ALTER TABLE active_branches ADD COLUMN repo_name TEXT').run();
-
-        } catch {}
-
-        // ذخیره موقت repo info برای این branch
-
-        await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES (?, ?)").bind('branch_repo_' + branch, JSON.stringify({ owner: completingRepoConfig.owner, repo: completingRepoConfig.repo })).run();
-
-        const totalSizeBytes = await getBranchTotalSize(env, branch, completingRepoConfig) || 0;
+        const totalSizeBytes = await getBranchTotalSize(env, branch) || 0;
 
         const oversizedRow = await env.DB.prepare('SELECT file_url, file_size, password, created_at FROM oversized_pending WHERE chat_id = ?').bind(chatId).first();
 
@@ -3259,9 +2969,7 @@ export default {
 
             if (reqRow?.request_data) { try { const rd = JSON.parse(reqRow.request_data); password = rd.password || password; } catch {} }
 
-            const oversizedRepoConfig = await getRepoConfigForBranch(env, branch);
-
-            const link = `https://github.com/${oversizedRepoConfig.owner}/${oversizedRepoConfig.repo}/archive/${branch}.zip`;
+            const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
 
             const quotaText = await getRemainingQuotaText(env, chatId, true, planInfo);
 
@@ -3293,15 +3001,11 @@ export default {
 
         }
 
-        // پیدا کردن ریپوی مربوط به این branch
-
-        const branchRepoConfig = await getRepoConfigForBranch(env, branch);
-
         const vc = await canUploadByVolume(env, chatId, totalSizeBytes, isPro, planInfo);
 
         if (!vc.allowed) {
 
-          await deleteBranchFromGitHub(env, branch, branchRepoConfig);
+          await deleteBranchFromGitHub(env, branch);
 
           await dbRemoveActiveBranch(env, branch);
 
@@ -3321,11 +3025,7 @@ export default {
 
         const expiresAt = Math.floor(Date.now() / 1000) + (isPro ? proTTL : normalTTL);
 
-        // ذخیره اطلاعات ریپو برای این branch
-
-        const completedRepoConfig = await getRepoConfigForBranch(env, branch) || REPO_CONFIGS[0];
-
-        await dbSetBranchForUser(env, chatId, branch, expiresAt, completedRepoConfig.owner, completedRepoConfig.repo);
+        await dbSetBranchForUser(env, chatId, branch, expiresAt);
 
         await env.DB.prepare('UPDATE user_state SET status = ?, branch_name = ? WHERE chat_id = ?').bind('done', branch, chatId).run();
 
@@ -3361,11 +3061,7 @@ export default {
 
         
 
-        // ساخت لینک دانلود بر اساس ریپوی مرتبط
-
-        const finalRepoConfig = await getRepoConfigForBranch(env, branch);
-
-        const link = `https://github.com/${finalRepoConfig.owner}/${finalRepoConfig.repo}/archive/${branch}.zip`;
+        const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${branch}.zip`;
 
         const quotaText = await getRemainingQuotaText(env, chatId, isPro, planInfo);
 
@@ -3463,9 +3159,9 @@ export default {
 
         };
 
-        if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString(), extractName(update.message.from), update.message.from?.username || null);
+        if (update.message?.chat?.id) await dbAddUser(env, update.message.chat.id.toString(), extractName(update.message.from));
 
-        if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString(), extractName(update.callback_query.from), update.callback_query.from?.username || null);
+        if (update.callback_query?.message?.chat?.id) await dbAddUser(env, update.callback_query.message.chat.id.toString(), extractName(update.callback_query.from));
 
         // بررسی حالت maintenance
 
@@ -3506,64 +3202,6 @@ export default {
           await dbSetBroadcastCancelled(env, ADMIN_CHAT_ID);
 
           await sendMessage(ADMIN_CHAT_ID, "⛔ درخواست لغو ثبت شد. ارسال در اولین فرصت متوقف می‌شود.", ADMIN_KEYBOARD, TOKEN);
-
-          return new Response('OK');
-
-        }
-
-        // ---- پیام خوش‌آمد قبل از /start (my_chat_member) ----
-
-        if (update.my_chat_member) {
-
-          try {
-
-            const newStatus = update.my_chat_member?.new_chat_member?.status;
-
-            const userId = update.my_chat_member?.from?.id?.toString();
-
-            if (newStatus === 'member' && userId) {
-
-              const settings = await getBotSettings(env);
-
-              const welcomeText = settings['welcome_text'] || null;
-
-              const welcomeFileId = settings['welcome_image_file_id'] || null;
-
-              if (welcomeText || welcomeFileId) {
-
-                if (welcomeFileId) {
-
-                  await fetch(`https://api.telegram.org/bot${TOKEN}/sendPhoto`, {
-
-                    method: 'POST',
-
-                    headers: { 'Content-Type': 'application/json' },
-
-                    body: JSON.stringify({
-
-                      chat_id: userId,
-
-                      photo: welcomeFileId,
-
-                      caption: welcomeText || '👋 به ربات خوش آمدید!',
-
-                      parse_mode: 'HTML'
-
-                    })
-
-                  });
-
-                } else {
-
-                  await sendSimple(userId, welcomeText, TOKEN);
-
-                }
-
-              }
-
-            }
-
-          } catch (e) { console.error('my_chat_member error:', e); }
 
           return new Response('OK');
 
@@ -3929,162 +3567,6 @@ export default {
 
           // ---- منوی اصلی ----
 
-          // ---- قوانین و حریم خصوصی ----
-
-          if (data === 'privacy_policy') {
-
-            await answerCallback(cb.id, TOKEN);
-
-            await editMessage(chatId, msgId,
-
-              `📜 <b>قوانین استفاده و حریم خصوصی</b>\n\n` +
-
-              `با استفاده از این ربات، شما موارد زیر را می‌پذیرید:\n\n` +
-
-              `🔹 <b>پذیرش قوانین:</b>\n` +
-
-              `• استفاده از این ربات به منزله پذیرش تمام قوانین جمهوری اسلامی ایران است.\n` +
-
-              `• کاربر متعهد است محتوای غیرقانونی، مستهجن، خلاف اخلاق یا ناقض حقوق دیگران را از طریق ربات ارسال نکند.\n\n` +
-
-              `🔹 <b>مسئولیت کاربر:</b>\n` +
-
-              `• مسئولیت کامل هرگونه محتوایی که از طریق ربات ارسال می‌کنید، کاملاً بر عهده خود شماست.\n` +
-
-              `• هر گونه سوءاستفاده از ربات، ارسال فایل‌های غیرمجاز یا هر اقدام مغایر با قانون، پیامدهای قانونی برای کاربر خواهد داشت.\n` +
-
-              `• ربات هیچ‌گونه مسئولیتی در قبال محتوای ارسالی توسط کاربران ندارد.\n\n` +
-
-              `🔹 <b>ذخیره‌سازی اطلاعات:</b>\n` +
-
-              `• اطلاعات پایه شما (شناسه کاربری، نام، نام کاربری تلگرام) به صورت ایمن در پایگاه داده ربات ذخیره می‌شود.\n` +
-
-              `• این اطلاعات صرفاً برای ارائه خدمات بهتر و پشتیبانی استفاده می‌شود.\n` +
-
-              `• در صورت درخواست مراجع قانونی ذی‌صلاح، اطلاعات مربوط به کاربر در اختیار آن مراجع قرار خواهد گرفت.\n\n` +
-
-              `🔹 <b>استفاده مسئولانه:</b>\n` +
-
-              `• از ارسال فایل‌های شخصی، محرمانه یا حساس خودداری کنید. فایل‌ها روی مخازن عمومی GitHub ذخیره می‌شوند.\n` +
-
-              `• از ربات فقط برای دانلود فایل‌های مجاز با اینترنت ملی استفاده کنید.\n` +
-
-              `• سوءاستفاده یا استفاده غیرمتعارف از ربات موجب مسدودسازی حساب کاربری و پیگیری قانونی خواهد شد.\n\n` +
-
-              `✅ استفاده از ربات به منزله تأیید و پذیرش تمامی موارد فوق است.`,
-
-              MAIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          // ---- مدیریت تصویر/متن خوش‌آمد (ادمین) ----
-
-          if (data === 'admin_welcome_settings') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            const settings = await getBotSettings(env);
-
-            const currentText = settings['welcome_text'] || '(تنظیم نشده)';
-
-            const currentImg = settings['welcome_image_file_id'] ? '✅ تصویر تنظیم شده' : '❌ تصویر تنظیم نشده';
-
-            await editMessage(chatId, msgId,
-
-              `🖼 <b>مدیریت پیام خوش‌آمدگویی</b>\n\n` +
-
-              `این پیام/تصویر هنگامی که کاربر ربات را برای اولین بار باز می‌کند (قبل از /start) نمایش داده می‌شود.\n\n` +
-
-              `📝 متن فعلی: ${currentText.substring(0, 200)}\n` +
-
-              `🖼 وضعیت تصویر: ${currentImg}\n\n` +
-
-              `⚠️ توجه: برای فعال‌سازی قابلیت نمایش پیام قبل از /start، باید allowed_updates ربات شامل my_chat_member باشد. این را از پنل Cloudflare Workers یا از طریق setWebhook با allowed_updates=["message","callback_query","pre_checkout_query","my_chat_member"] تنظیم کنید.`,
-
-              {
-
-                inline_keyboard: [
-
-                  [colorBtn("📝 تغییر متن خوش‌آمد", "admin_set_welcome_text", "primary")],
-
-                  [colorBtn("🖼 تنظیم تصویر خوش‌آمد", "admin_set_welcome_image", "blue")],
-
-                  [colorBtn("🗑 حذف تصویر", "admin_clear_welcome_image", "red"), colorBtn("🗑 حذف متن", "admin_clear_welcome_text", "red")],
-
-                  [colorBtn("🔙 پنل مدیریت", "admin_panel", "danger")]
-
-                ]
-
-              }, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          if (data === 'admin_set_welcome_text') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            await dbSetAdminState(env, chatId, { step: 'awaiting_welcome_text' });
-
-            await editMessage(chatId, msgId, `📝 <b>تغییر متن خوش‌آمدگویی</b>\n\nمتن جدید را ارسال کنید (از HTML پشتیبانی می‌شود):`, ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          if (data === 'admin_set_welcome_image') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            await dbSetAdminState(env, chatId, { step: 'awaiting_welcome_image' });
-
-            await editMessage(chatId, msgId, `🖼 <b>تنظیم تصویر خوش‌آمدگویی</b>\n\nتصویر مورد نظر را ارسال کنید:`, ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          if (data === 'admin_clear_welcome_image') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('welcome_image_file_id', '')").run();
-
-            await editMessage(chatId, msgId, '✅ تصویر خوش‌آمدگویی حذف شد.', ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          if (data === 'admin_clear_welcome_text') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('welcome_text', '')").run();
-
-            await editMessage(chatId, msgId, '✅ متن خوش‌آمدگویی حذف شد.', ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          // ---- جستجوی کاربر (ادمین) ----
-
-          if (data === 'admin_user_lookup') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            await dbSetAdminState(env, chatId, { step: 'awaiting_user_lookup' });
-
-            await editMessage(chatId, msgId, `🔍 <b>جستجوی کاربر</b>\n\nچت آی دی یا یوزرنیم کاربر را ارسال کنید:\n(مثال: <code>123456789</code> یا <code>@username</code>)`, ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
           if (data === 'back_to_main') {
 
             await dbDeleteAdminState(env, chatId);
@@ -4161,7 +3643,7 @@ export default {
 
             const totalCoupons = (await env.DB.prepare('SELECT COUNT(*) as c FROM coupons WHERE active = 1').first())?.c || 0;
 
-            const repoSize = await getTotalRepoSize(env);
+            const repoSize = await getRepoSize(env);
 
             await editMessage(chatId, msgId,
 
@@ -4262,6 +3744,7 @@ export default {
             return new Response('OK');
 
           }
+
           // ---- تنظیمات رفرال (ادمین) ----
 
           if (data === 'admin_rial_settings') {
@@ -4280,7 +3763,7 @@ export default {
 
               [colorBtn('🔑 تغییر API Key', 'admin_rial_set_apikey', 'blue')],
 
-              [colorBtn('🔙 بازگشت', 'admin_panel', 'danger')]
+              [colorBtn('🔙 بازگشت', 'back_to_admin', 'danger')]
 
             ]};
 
@@ -5258,70 +4741,6 @@ export default {
 
           }
 
-          // ---- تنظیم حداکثر پردازش همزمان ----
-
-          if (data === 'admin_set_max_concurrent') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            const currentMax = await getEffectiveMaxConcurrent(env);
-
-            await dbSetAdminState(env, chatId, { step: 'awaiting_max_concurrent' });
-
-            await editMessage(chatId, msgId,
-
-              `⚙️ <b>تنظیم حداکثر پردازش همزمان</b>\n\nمقدار فعلی: <b>${currentMax}</b>\n\nتعداد پردازش‌های همزمان جدید را وارد کنید:\n(هر عدد بین 1 تا 50)\n\n💡 توصیه: اگر ${getActiveRepos(env).length} ریپازیتوری دارید، مقدار ${getActiveRepos(env).length * 3} یا بیشتر مناسب است.`,
-
-              ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
-          // ---- وضعیت ریپازیتوری‌ها ----
-
-          if (data === 'admin_repos_status') {
-
-            if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
-
-            const activeRepos = getActiveRepos(env);
-
-            const totalMax = await getEffectiveMaxConcurrent(env);
-
-            let msg = `🔀 <b>وضعیت ریپازیتوری‌ها</b>\n\n`;
-
-            msg += `⚙️ حداکثر پردازش همزمان: <b>${totalMax}</b>\n`;
-
-            msg += `✅ ریپازیتوری‌های فعال: <b>${activeRepos.length}</b> از ${REPO_CONFIGS.length}\n\n`;
-
-            for (let i = 0; i < REPO_CONFIGS.length; i++) {
-
-              const rc = REPO_CONFIGS[i];
-
-              const isActive = !!env[rc.tokenEnvKey];
-
-              const size = isActive ? await getRepoSize(env, rc) : 0;
-
-              msg += `${isActive ? '✅' : '❌'} <b>ریپو ${i + 1}:</b>\n`;
-
-              msg += `   👤 ${rc.owner}/${rc.repo}\n`;
-
-              msg += `   🔑 Token: ${rc.tokenEnvKey} (${isActive ? 'تنظیم شده' : 'تنظیم نشده'})\n`;
-
-              if (isActive) msg += `   📦 حجم: ${size.toFixed(1)} از ${REPO_SIZE_LIMIT_GB} GB\n`;
-
-              msg += `\n`;
-
-            }
-
-            msg += `💡 برای فعال کردن ریپو دوم، متغیر <code>GH_TOKEN_2</code> را در تنظیمات Cloudflare Worker اضافه کنید.`;
-
-            await editMessage(chatId, msgId, msg, ADMIN_KEYBOARD, TOKEN);
-
-            return new Response('OK');
-
-          }
-
           if (data.startsWith('admin_remove_channel:')) {
 
             if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return new Response('OK');
@@ -5382,7 +4801,7 @@ export default {
 
             const kb = { inline_keyboard: [[colorBtn(`⭐️ پرداخت ${starsPrice} Stars`, si.invoiceLink, "primary")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
 
-            await editMessage(chatId, msgId, `⭐️ <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${starsPrice} Stars</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}\n\n⚠️ <b>کاربر عزیز، ممنونم از خرید شما.</b>\nدر نظر داشته باشید تلاش ما مهیا کردن ادامه شرایط استفاده از این ربات هست، اما با توجه به محدودیت‌های روزافزون و غیرقابل پیش‌بینی اینترنت، درصورت مسدود شدن روش فعلی تمام تلاش ما برای جایگزینی روش و ادامه خدمت به شماست، اما در صورت عدم امکان جایگزینی، امکان عودت وجه وجود ندارد. با عنایت به توضیح بالا خرید خود را نهایی کنید. ممنون از اعتماد شما.`, kb, TOKEN);
+            await editMessage(chatId, msgId, `⭐️ <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${starsPrice} Stars</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
 
             return new Response('OK');
 
@@ -5410,7 +4829,7 @@ export default {
 
             const kb = { inline_keyboard: [[colorBtn(`💰 پرداخت ${usdPrice}$`, ci.invoiceUrl, "success")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
 
-            await editMessage(chatId, msgId, `💰 <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💵 قیمت: <b>${usdPrice}$</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}\n\n⚠️ <b>کاربر عزیز، ممنونم از خرید شما.</b>\nدر نظر داشته باشید تلاش ما مهیا کردن ادامه شرایط استفاده از این ربات هست، اما با توجه به محدودیت‌های روزافزون و غیرقابل پیش‌بینی اینترنت، درصورت مسدود شدن روش فعلی تمام تلاش ما برای جایگزینی روش و ادامه خدمت به شماست، اما در صورت عدم امکان جایگزینی، امکان عودت وجه وجود ندارد. با عنایت به توضیح بالا خرید خود را نهایی کنید. ممنون از اعتماد شما.`, kb, TOKEN);
+            await editMessage(chatId, msgId, `💰 <b>خرید پلن: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💵 قیمت: <b>${usdPrice}$</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}`, kb, TOKEN);
 
             return new Response('OK');
 
@@ -5446,9 +4865,7 @@ export default {
 
             const kb = { inline_keyboard: [[colorBtn(`🏦 پرداخت ${finalRial.toLocaleString('fa-IR')} تومان`, order.paymentUrl, "success")], [colorBtn("🔙 بازگشت", "pro_info", "danger")]] };
 
-            const warningMsgRial = `🏦 <b>خرید پلن با درگاه ریالی: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${finalRial.toLocaleString('fa-IR')} تومان</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}\n\n⚡️ پس از پرداخت، پلن به صورت خودکار فعال می‌شود.\n\n⚠️ <b>کاربر عزیز، ممنونم از خرید شما.</b>\nدر نظر داشته باشید تلاش ما مهیا کردن ادامه شرایط استفاده از این ربات هست، اما با توجه به محدودیت‌های روزافزون و غیرقابل پیش‌بینی اینترنت، درصورت مسدود شدن روش فعلی تمام تلاش ما برای جایگزینی روش و ادامه خدمت به شماست، اما در صورت عدم امکان جایگزینی، امکان عودت وجه وجود ندارد. با عنایت به توضیح بالا خرید خود را نهایی کنید. ممنون از اعتماد شما.`;
-
-            await editMessage(chatId, msgId, warningMsgRial, kb, TOKEN);
+            await editMessage(chatId, msgId, `🏦 <b>خرید پلن با درگاه ریالی: ${plan.name}</b>\n\n📅 ${plan.duration_days} روز\n📁 ${plan.daily_files} فایل (🚀 ${plan.daily_direct_files} مستقیم)/روز\n💾 ${plan.daily_volume_gb} GB/روز\n📏 حداکثر حجم هر فایل: ${maxFileMB} مگابایت\n\n💰 قیمت: <b>${finalRial.toLocaleString('fa-IR')} تومان</b>${planDiscount ? ` (${planDiscount.discount_percent}٪ تخفیف)` : ''}\n\n⚡️ پس از پرداخت، پلن به صورت خودکار فعال می‌شود.`, kb, TOKEN);
 
             return new Response('OK');
 
@@ -5692,9 +5109,7 @@ export default {
 
               if (lb) {
 
-                const statusRepoConfig = await getRepoConfigForBranch(env, lb);
-
-                const link = `https://github.com/${statusRepoConfig.owner}/${statusRepoConfig.repo}/archive/${lb}.zip`;
+                const link = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/archive/${lb}.zip`;
 
                 await editMessage(chatId, msgId, `✅ <b>فایل آماده است!</b>\n\n🔗 ${link}\n\n${qt}${proInfo}${st}`, { inline_keyboard: [[colorBtn("🗑 حذف فایل", "delete_my_file", "danger")], [colorBtn("📥 لینک جدید", "new_link_check", "primary")]] }, TOKEN);
 
@@ -5815,30 +5230,6 @@ export default {
           const chatId = update.message.chat.id.toString();
 
           
-
-          // ---- هندل تصویر خوش‌آمد توسط ادمین ----
-
-          if (update.message.photo && chatId === ADMIN_CHAT_ID) {
-
-            const adminPhotoState = await dbGetAdminState(env, chatId);
-
-            if (adminPhotoState?.step === 'awaiting_welcome_image') {
-
-              const photos = update.message.photo;
-
-              const bestPhoto = photos[photos.length - 1];
-
-              await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('welcome_image_file_id', ?)").bind(bestPhoto.file_id).run();
-
-              await dbDeleteAdminState(env, chatId);
-
-              await sendMessage(chatId, "✅ تصویر خوش‌آمدگویی ذخیره شد.", ADMIN_KEYBOARD, TOKEN);
-
-              return new Response('OK');
-
-            }
-
-          }
 
           // ---- هندل کردن ارسال فایل مستقیم ----
 
@@ -6013,34 +5404,6 @@ export default {
               const step = adminState.step;
 
               
-
-              if (step === 'awaiting_max_concurrent') {
-
-                const newMax = parseInt(text);
-
-                if (isNaN(newMax) || newMax < 1 || newMax > 200) {
-
-                  await sendMessage(chatId, "❌ عدد بین 1 تا 200 وارد کنید.", ADMIN_KEYBOARD, TOKEN);
-
-                  return new Response('OK');
-
-                }
-
-                await setBotSetting(env, 'max_concurrent', newMax);
-
-                await dbDeleteAdminState(env, chatId);
-
-                const activeRepos = getActiveRepos(env);
-
-                await sendMessage(chatId,
-
-                  `✅ <b>حداکثر پردازش همزمان روی ${newMax} تنظیم شد.</b>\n\n📊 ریپازیتوری‌های فعال: ${activeRepos.length}\n⚖️ بار هر ریپو: حدود ${Math.ceil(newMax / activeRepos.length)} پردازش`,
-
-                  ADMIN_KEYBOARD, TOKEN);
-
-                return new Response('OK');
-
-              }
 
               if (step === 'awaiting_broadcast_message') {
 
@@ -6826,88 +6189,6 @@ export default {
 
               }
 
-              if (step === 'awaiting_welcome_text') {
-
-                if (text === '/cancel') { await dbDeleteAdminState(env, chatId); await sendMessage(chatId, "❌ لغو شد.", ADMIN_KEYBOARD, TOKEN); return new Response('OK'); }
-
-                await env.DB.prepare("INSERT OR REPLACE INTO bot_settings (setting_key, setting_value) VALUES ('welcome_text', ?)").bind(text.trim()).run();
-
-                await dbDeleteAdminState(env, chatId);
-
-                await sendMessage(chatId, "✅ متن خوش‌آمدگویی ذخیره شد.", ADMIN_KEYBOARD, TOKEN);
-
-                return new Response('OK');
-
-              }
-
-              if (step === 'awaiting_user_lookup') {
-
-                const lookupId = text.trim().replace('@', '');
-
-                let userRow = null;
-
-                if (!isNaN(lookupId)) {
-
-                  userRow = await env.DB.prepare('SELECT u.chat_id, u.name, u.username, u.first_seen, u.last_seen, p.expires_at as pro_expires FROM users u LEFT JOIN pro_users p ON u.chat_id = p.chat_id AND p.expires_at > ? WHERE u.chat_id = ?').bind(Math.floor(Date.now()/1000), lookupId).first();
-
-                } else {
-
-                  userRow = await env.DB.prepare('SELECT u.chat_id, u.name, u.username, u.first_seen, u.last_seen, p.expires_at as pro_expires FROM users u LEFT JOIN pro_users p ON u.chat_id = p.chat_id AND p.expires_at > ? WHERE LOWER(u.username) = LOWER(?)').bind(Math.floor(Date.now()/1000), lookupId).first();
-
-                }
-
-                await dbDeleteAdminState(env, chatId);
-
-                if (!userRow) {
-
-                  await sendMessage(chatId, `❌ کاربری با این مشخصات یافت نشد.`, ADMIN_KEYBOARD, TOKEN);
-
-                  return new Response('OK');
-
-                }
-
-                const isPro = !!userRow.pro_expires;
-
-                const proExpiry = isPro ? new Date(userRow.pro_expires * 1000).toLocaleDateString('fa-IR') : '—';
-
-                const joinDate = userRow.first_seen ? new Date(userRow.first_seen).toLocaleDateString('fa-IR') : 'نامشخص';
-
-                const lastSeen = userRow.last_seen ? new Date(userRow.last_seen).toLocaleDateString('fa-IR') : 'نامشخص';
-
-                const dailyRow = await env.DB.prepare('SELECT file_count, direct_file_count, daily_volume_bytes FROM daily_limits WHERE chat_id = ?').bind(userRow.chat_id).first();
-
-                const fileCount = dailyRow?.file_count || 0;
-
-                const volumeMB = ((dailyRow?.daily_volume_bytes || 0) / (1024*1024)).toFixed(1);
-
-                await sendMessage(chatId,
-
-                  `🔍 <b>اطلاعات کاربر</b>\n\n` +
-
-                  `🆔 چت آی دی: <code>${userRow.chat_id}</code>\n` +
-
-                  `👤 نام: ${userRow.name || '—'}\n` +
-
-                  `🔗 یوزرنیم: ${userRow.username ? '@'+userRow.username : '—'}\n` +
-
-                  `📅 تاریخ عضویت: ${joinDate}\n` +
-
-                  `🕐 آخرین فعالیت: ${lastSeen}\n` +
-
-                  `⭐️ وضعیت Pro: ${isPro ? '✅ فعال تا '+proExpiry : '❌ ندارد'}\n\n` +
-
-                  `📊 <b>مصرف امروز:</b>\n` +
-
-                  `• فایل‌های دریافتی: ${fileCount}\n` +
-
-                  `• حجم دریافتی: ${volumeMB} مگابایت`,
-
-                  ADMIN_KEYBOARD, TOKEN);
-
-                return new Response('OK');
-
-              }
-
               // ---- ویزارد تیرهای رفرال ----
 
               if (step === 'awaiting_referral_tier_count') {
@@ -7393,3 +6674,7 @@ export default {
   }
 
 };
+
+
+
+             
